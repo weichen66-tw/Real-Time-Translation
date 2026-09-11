@@ -37,6 +37,7 @@ import json
 import time
 import queue
 import ctypes
+from ctypes import wintypes
 import threading
 import http.client
 import tkinter as tk
@@ -401,9 +402,24 @@ class Overlay:
     def load_pos(self, default):
         try:
             d = json.loads(POS_FILE.read_text())
-            return int(d["x"]), int(d["y"])
+            x, y = int(d["x"]), int(d["y"])
         except Exception:
             return default
+        if not self.on_any_monitor(x + self.w // 2, y + self.h // 2):
+            # 上次拖到的外接螢幕現在沒接，照舊開會跑到畫面外看不到；
+            # 位置檔不動，下次接回那台螢幕時字幕就會回到原處
+            print("上次的字幕位置不在目前的螢幕上（外接螢幕沒接？），先顯示在預設位置")
+            return default
+        return x, y
+
+    @staticmethod
+    def on_any_monitor(x, y):
+        """(x, y) 這一點有沒有落在目前接著的任何一個螢幕上"""
+        MONITOR_DEFAULTTONULL = 0
+        user32 = ctypes.windll.user32
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HMONITOR
+        return bool(user32.MonitorFromPoint(wintypes.POINT(x, y), MONITOR_DEFAULTTONULL))
 
     def save_pos(self):
         try:
