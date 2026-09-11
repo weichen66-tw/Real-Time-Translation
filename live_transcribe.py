@@ -39,7 +39,7 @@ MIN_RMS = 200                # 高於這個音量算「有人在講話」
 SILENCE_TO_FLUSH = 1.0       # 靜音超過這麼久就送出這一段
 MIN_SEGMENT_SEC = 0.4
 PREROLL_SEC = 0.5            # 永遠保留這麼長的前置音，避免吃掉句子開頭
-MAX_SEGMENT_SEC = 15.0       # 講太久也要強制切段
+MAX_SEGMENT_SEC = 8.0        # 講太久也要強制切段（--max-seconds 可調）
 
 OUT_FILE = Path(__file__).resolve().parent / "transcript.txt"
 
@@ -145,7 +145,7 @@ def load_model(name: str, force_cpu: bool = False):
 
 
 def main(model_name: str, min_rms: float, force_cpu: bool = False,
-         device_filter: str = None):
+         device_filter: str = None, max_segment: float = MAX_SEGMENT_SEC):
     print("載入模型中，第一次執行要下載，請稍候⋯")
     model = load_model(model_name, force_cpu)
 
@@ -242,7 +242,7 @@ def main(model_name: str, min_rms: float, force_cpu: bool = False,
                 while preroll_n > TARGET_RATE * PREROLL_SEC and preroll:
                     preroll_n -= len(preroll.popleft())
 
-            if buffer and len(np.concatenate(buffer)) > TARGET_RATE * MAX_SEGMENT_SEC:
+            if buffer and len(np.concatenate(buffer)) > TARGET_RATE * max_segment:
                 flush()
 
     except KeyboardInterrupt:
@@ -263,6 +263,7 @@ if __name__ == "__main__":
     model_name = "small"
     min_rms = MIN_RMS
     device_filter = None
+    max_segment = MAX_SEGMENT_SEC
 
     if "--list-devices" in args:
         list_loopback_devices()
@@ -275,5 +276,7 @@ if __name__ == "__main__":
             min_rms = float(args[i + 1])
         if a == "--device" and i + 1 < len(args):
             device_filter = args[i + 1]
+        if a == "--max-seconds" and i + 1 < len(args):
+            max_segment = float(args[i + 1])
 
-    main(model_name, min_rms, "--cpu" in args, device_filter)
+    main(model_name, min_rms, "--cpu" in args, device_filter, max_segment)

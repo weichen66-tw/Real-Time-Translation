@@ -50,7 +50,7 @@ MODELS = {
     "精準（large-v3-turbo，需要 NVIDIA 顯示卡）": "large-v3-turbo",
 }
 DEFAULTS = {"device": DEFAULT_DEVICE, "translator": "google", "model": "small",
-            "lines": 3, "min_rms": 200, "click_through": False}
+            "lines": 3, "min_rms": 200, "max_seconds": 8, "click_through": False}
 
 TIPS = ("① 遊戲請設成「無邊框視窗」（全螢幕獨佔會看不到字幕）\n"
         "② 選好下面的設定，按「開始」\n"
@@ -117,7 +117,8 @@ def list_devices():
 def build_overlay_args(s):
     """把畫面上的設定轉成字幕程式的指令參數"""
     args = ["--overlay", "--model", s["model"], "--min-rms", str(s["min_rms"]),
-            "--lines", str(s["lines"]), "--translator", s["translator"]]
+            "--lines", str(s["lines"]), "--translator", s["translator"],
+            "--max-seconds", str(s["max_seconds"])]
     if s["device"] != DEFAULT_DEVICE:
         args += ["--device", s["device"]]
     if s["click_through"]:
@@ -200,12 +201,20 @@ class Launcher:
         spin.grid(row=6, column=1, sticky="w", pady=4)
         self.inputs.append(spin)
 
-        self.build_rms_row(box, 7, s["min_rms"])
+        ttk.Label(box, text="切段秒數").grid(row=7, column=0, sticky="w", pady=4)
+        self.seconds_var = tk.StringVar(value=str(s["max_seconds"]))
+        seconds = ttk.Spinbox(box, from_=2, to=30, width=5, state="readonly",
+                              textvariable=self.seconds_var)
+        seconds.grid(row=7, column=1, sticky="w", pady=4)
+        self.inputs.append(seconds)
+        self.add_hint(box, 8, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
+
+        self.build_rms_row(box, 9, s["min_rms"])
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
         check = ttk.Checkbutton(box, variable=self.click_var,
                                 text="滑鼠穿透（不會擋到遊戲操作，但字幕不能拖曳，要按「停止」才能關）")
-        check.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        check.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
     def build_rms_row(self, box, row, value):
@@ -288,11 +297,16 @@ class Launcher:
             lines = min(max(int(self.lines_var.get()), 1), 5)
         except ValueError:
             lines = DEFAULTS["lines"]
+        try:
+            max_seconds = min(max(int(self.seconds_var.get()), 2), 30)
+        except ValueError:
+            max_seconds = DEFAULTS["max_seconds"]
         return {
             "device": self.device_var.get() or DEFAULT_DEVICE,
             "translator": TRANSLATORS[self.translator_var.get()],
             "model": MODELS[self.model_var.get()],
             "lines": lines,
+            "max_seconds": max_seconds,
             "min_rms": self.rms_var.get(),
             "click_through": self.click_var.get(),
         }

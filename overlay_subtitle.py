@@ -21,6 +21,7 @@ Step 3: 遊戲即時字幕懸浮視窗
 用法：
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
     py overlay_subtitle.py --translator gemini  # 改用 Gemini 翻譯
+    py overlay_subtitle.py --max-seconds 5    # 講不停時最多 5 秒就切一段（預設 8）
     py overlay_subtitle.py --click-through    # 滑鼠穿透，調好位置後用這個
     py overlay_subtitle.py --model base       # 換更快的模型
     py overlay_subtitle.py --min-rms 400      # 遊戲太吵時調高
@@ -64,7 +65,8 @@ TARGET_RATE = 16000
 SILENCE_TO_FLUSH = 1.0        # 靜音多久算一句講完
 MIN_SEGMENT_SEC = 0.4
 PREROLL_SEC = 0.5             # 永遠保留這麼長的前置音，避免吃掉句子開頭
-MAX_SEGMENT_SEC = 15.0
+MAX_SEGMENT_SEC = 8.0         # 對方講不停時，最多幾秒就先切一段送出（--max-seconds 可調）
+MAX_SEGMENT_RANGE = (2.0, 30.0)
 
 # ── 外觀設定 ──────────────────────────────────────────
 BG_COLOR = "#0b0b0f"
@@ -192,7 +194,7 @@ def load_model(name, force_cpu=False):
     return m
 
 
-def stt_worker(model, min_rms):
+def stt_worker(model, min_rms, max_segment):
     buffer, speaking, silence_start, seq = [], False, None, 0
     preroll, preroll_n = deque(), 0
     out = TRANSCRIPT.open("a", encoding="utf-8")
@@ -243,7 +245,7 @@ def stt_worker(model, min_rms):
             while preroll_n > TARGET_RATE * PREROLL_SEC and preroll:
                 preroll_n -= len(preroll.popleft())
 
-        if buffer and sum(len(b) for b in buffer) > TARGET_RATE * MAX_SEGMENT_SEC:
+        if buffer and sum(len(b) for b in buffer) > TARGET_RATE * max_segment:
             flush()
 
 
@@ -515,6 +517,7 @@ def main():
     click_through = "--click-through" in args
     device_filter = opt("--device", None)
     translator = opt("--translator", "google")
+    max_segment = float(opt("--max-seconds", MAX_SEGMENT_SEC))
 
     if "--list-devices" in args:
         list_loopback_devices()
@@ -522,6 +525,9 @@ def main():
 
     if translator not in ("google", "gemini"):
         sys.exit("--translator 只能是 google 或 gemini")
+    low, high = MAX_SEGMENT_RANGE
+    if not low <= max_segment <= high:
+        sys.exit(f"--max-seconds 只能在 {low:.0f} 到 {high:.0f} 之間")
 
     key = None
     if translator == "google":
@@ -548,7 +554,8 @@ def main():
     threading.Thread(target=capture_worker,
                      args=(dev, rate, channels), daemon=True).start()
     threading.Thread(target=stt_worker,
-                     args=(model, min_rms), daemon=True).start()
+                     args=(model, min_rms, max_segment), daemon=True).start()
+    print(f"切段：安靜 {SILENCE_TO_FLUSH:.1f} 秒算講完，講不停最多 {max_segment:.0f} 秒切一段")
     if translator:
         for _ in range(2):
             threading.Thread(target=translate_worker,

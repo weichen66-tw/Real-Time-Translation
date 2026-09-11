@@ -52,6 +52,7 @@ py overlay_subtitle.py
 py overlay_subtitle.py --click-through --lines 2 --model base --min-rms 400
 py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可以避開遊戲音效
 py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
+py overlay_subtitle.py --max-seconds 5     # 講不停時最多幾秒切一段（預設 8）
 ```
 
 第二、三階段共用的幾個選項：`--model`（選 whisper 模型大小，預設 `small`，越大越準但越慢）、
@@ -108,7 +109,8 @@ capture_worker ──audio_q──> stt_worker ──trans_q──> translate_wo
 
 **怎麼判斷一句話講完了。** 這裡沒有用現成的套件，是自己寫的：算出當下音量（rms，簡單說就是聲音大小），
 音量超過 `min_rms` 就開始收音；安靜超過 `SILENCE_TO_FLUSH`（1 秒）就當作這句講完，送去辨識；
-如果有人一直講不停，`MAX_SEGMENT_SEC`（15 秒）會強制切一段。
+如果有人一直講不停，`MAX_SEGMENT_SEC`（預設 8 秒，用 `--max-seconds` 或啟動視窗的「切段秒數」調整）
+會強制切一段。這個值不要設太大：實測切成 30 秒一段時，whisper 的辨識結果會整段變成亂碼。
 
 另外還準備了一個 `PREROLL_SEC`（0.5 秒）的小緩衝區，永遠偷偷留著「開始講話前那半秒」的聲音，
 在開始收音時補到最前面。沒有這個的話，每句話開頭的第一個音會被切掉。
