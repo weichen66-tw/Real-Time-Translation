@@ -37,6 +37,7 @@ ENV_FILE = HERE / ".env"
 APP_TITLE = "遊戲即時字幕"
 UI_FONT = ("Microsoft JhengHei", 10)
 DEFAULT_DEVICE = "Windows 預設喇叭"
+NO_APP = "（不指定，錄整台電腦的聲音）"
 MAX_LOG_LINES = 500
 
 # 畫面上顯示的文字 → 傳給字幕程式的參數值
@@ -49,7 +50,7 @@ MODELS = {
     "標準（small）": "small",
     "精準（large-v3-turbo，需要 NVIDIA 顯示卡）": "large-v3-turbo",
 }
-DEFAULTS = {"device": DEFAULT_DEVICE, "translator": "google", "model": "small",
+DEFAULTS = {"device": DEFAULT_DEVICE, "app": NO_APP, "translator": "google", "model": "small",
             "lines": 3, "min_rms": 200, "max_seconds": 8, "click_through": False}
 
 TIPS = ("① 遊戲請設成「無邊框視窗」（全螢幕獨佔會看不到字幕）\n"
@@ -114,12 +115,27 @@ def list_devices():
         return []
 
 
+def list_audio_apps():
+    """
+    列出「已經發出過聲音」的程式名稱。Windows 只有在程式實際播過聲音之後
+    才會有這筆紀錄，所以剛開的程式可能還不在清單裡，要按「重新整理」再看一次。
+    """
+    try:
+        from pycaw.pycaw import AudioUtilities
+        names = {s.Process.name() for s in AudioUtilities.GetAllSessions() if s.Process}
+        return sorted(names, key=str.lower)
+    except Exception:
+        return []
+
+
 def build_overlay_args(s):
     """把畫面上的設定轉成字幕程式的指令參數"""
     args = ["--overlay", "--model", s["model"], "--min-rms", str(s["min_rms"]),
             "--lines", str(s["lines"]), "--translator", s["translator"],
             "--max-seconds", str(s["max_seconds"])]
-    if s["device"] != DEFAULT_DEVICE:
+    if s["app"] != NO_APP:
+        args += ["--app", s["app"]]          # 指定程式時就不看聲音來源了
+    elif s["device"] != DEFAULT_DEVICE:
         args += ["--device", s["device"]]
     if s["click_through"]:
         args.append("--click-through")
@@ -172,49 +188,59 @@ class Launcher:
         box.pack(fill="x", pady=(10, 0))
         box.columnconfigure(1, weight=1)
 
+        self.app_var = tk.StringVar()
+        self.app_box = self.add_combo(box, 0, "只翻譯這個程式", self.app_var, [])
+        self.app_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_source_state())
+        refresh_app = ttk.Button(box, text="重新整理", command=self.refresh_apps)
+        refresh_app.grid(row=0, column=2, padx=(6, 0))
+        self.inputs.append(refresh_app)
+        self.add_hint(box, 1, "選 Discord 就只翻譯 Discord 的聲音，遊戲角色講話不會被翻。"
+                              "\n清單裡沒有的話，先讓那個程式發出一次聲音，再按「重新整理」")
+        self.refresh_apps(select=s["app"])
+
         self.device_var = tk.StringVar()
-        self.device_box = self.add_combo(box, 0, "聲音來源", self.device_var, [])
-        refresh = ttk.Button(box, text="重新整理", command=self.refresh_devices)
-        refresh.grid(row=0, column=2, padx=(6, 0))
-        self.inputs.append(refresh)
-        self.add_hint(box, 1, "別人講話的聲音從哪個喇叭／耳機播出來，就選哪個")
+        self.device_box = self.add_combo(box, 2, "聲音來源", self.device_var, [])
+        self.device_refresh = ttk.Button(box, text="重新整理", command=self.refresh_devices)
+        self.device_refresh.grid(row=2, column=2, padx=(6, 0))
+        self.device_hint = self.add_hint(box, 3, "")
         self.refresh_devices(select=s["device"])
+        self.refresh_source_state()
 
         self.translator_var = tk.StringVar(value=label_of(TRANSLATORS, s["translator"]))
-        combo = self.add_combo(box, 2, "翻譯方式", self.translator_var, list(TRANSLATORS))
+        combo = self.add_combo(box, 4, "翻譯方式", self.translator_var, list(TRANSLATORS))
         combo.bind("<<ComboboxSelected>>", lambda _: self.refresh_key_state())
 
-        ttk.Label(box, text="Gemini 金鑰").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="Gemini 金鑰").grid(row=5, column=0, sticky="w", pady=4)
         self.key_var = tk.StringVar()
         self.key_entry = ttk.Entry(box, textvariable=self.key_var, show="•")
-        self.key_entry.grid(row=3, column=1, sticky="ew", pady=4)
-        self.key_hint = self.add_hint(box, 4, "")
+        self.key_entry.grid(row=5, column=1, sticky="ew", pady=4)
+        self.key_hint = self.add_hint(box, 6, "")
         self.refresh_key_state()
 
         self.model_var = tk.StringVar(value=label_of(MODELS, s["model"]))
-        self.add_combo(box, 5, "辨識準確度", self.model_var, list(MODELS))
+        self.add_combo(box, 7, "辨識準確度", self.model_var, list(MODELS))
 
-        ttk.Label(box, text="字幕行數").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="字幕行數").grid(row=8, column=0, sticky="w", pady=4)
         self.lines_var = tk.StringVar(value=str(s["lines"]))
         spin = ttk.Spinbox(box, from_=1, to=5, width=5, textvariable=self.lines_var,
                            state="readonly")
-        spin.grid(row=6, column=1, sticky="w", pady=4)
+        spin.grid(row=8, column=1, sticky="w", pady=4)
         self.inputs.append(spin)
 
-        ttk.Label(box, text="切段秒數").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="切段秒數").grid(row=9, column=0, sticky="w", pady=4)
         self.seconds_var = tk.StringVar(value=str(s["max_seconds"]))
         seconds = ttk.Spinbox(box, from_=2, to=30, width=5, state="readonly",
                               textvariable=self.seconds_var)
-        seconds.grid(row=7, column=1, sticky="w", pady=4)
+        seconds.grid(row=9, column=1, sticky="w", pady=4)
         self.inputs.append(seconds)
-        self.add_hint(box, 8, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
+        self.add_hint(box, 10, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
 
-        self.build_rms_row(box, 9, s["min_rms"])
+        self.build_rms_row(box, 11, s["min_rms"])
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
         check = ttk.Checkbutton(box, variable=self.click_var,
                                 text="滑鼠穿透（不會擋到遊戲操作，但字幕不能拖曳，要按「停止」才能關）")
-        check.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        check.grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
     def build_rms_row(self, box, row, value):
@@ -274,6 +300,22 @@ class Launcher:
         want = select or self.device_var.get()
         self.device_var.set(want if want in names else DEFAULT_DEVICE)
 
+    def refresh_apps(self, select=None):
+        names = [NO_APP] + list_audio_apps()
+        self.app_box.config(values=names)
+        want = select or self.app_var.get()
+        self.app_var.set(want if want in names else NO_APP)
+
+    def refresh_source_state(self):
+        """指定了程式之後，「聲音來源」就用不到了，把它變灰避免誤會"""
+        whole_pc = self.app_var.get() == NO_APP
+        running = self.proc is not None and self.proc.poll() is None
+        for w in (self.device_box, self.device_refresh):
+            w.state(["!disabled"] if whole_pc and not running else ["disabled"])
+        self.device_hint.config(
+            text="別人講話的聲音從哪個喇叭／耳機播出來，就選哪個" if whole_pc
+            else "已指定程式，這項用不到")
+
     def refresh_key_state(self):
         using_gemini = TRANSLATORS[self.translator_var.get()] == "gemini"
         running = self.proc is not None and self.proc.poll() is None
@@ -291,6 +333,7 @@ class Launcher:
         self.start_btn.state(["disabled"] if running else ["!disabled"])
         self.stop_btn.state(["!disabled"] if running else ["disabled"])
         self.refresh_key_state()
+        self.refresh_source_state()
 
     def read_form(self):
         try:
@@ -303,6 +346,7 @@ class Launcher:
             max_seconds = DEFAULTS["max_seconds"]
         return {
             "device": self.device_var.get() or DEFAULT_DEVICE,
+            "app": self.app_var.get() or NO_APP,
             "translator": TRANSLATORS[self.translator_var.get()],
             "model": MODELS[self.model_var.get()],
             "lines": lines,

@@ -53,6 +53,7 @@ py overlay_subtitle.py --click-through --lines 2 --model base --min-rms 400
 py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可以避開遊戲音效
 py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
 py overlay_subtitle.py --max-seconds 5     # 講不停時最多幾秒切一段（預設 8）
+py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不錄遊戲音效
 ```
 
 第二、三階段共用的幾個選項：`--model`（選 whisper 模型大小，預設 `small`，越大越準但越慢）、
@@ -119,6 +120,15 @@ capture_worker ──audio_q──> stt_worker ──trans_q──> translate_wo
 **聲音格式的轉換。** Windows 錄下來的聲音是裝置原本的取樣率和聲道數（左右聲道交錯排在一起）。
 `to_mono_16k` 負責把它轉成 whisper 唯一能接受的格式：先換算數值範圍，把多聲道平均成單聲道，
 再用 `resample_poly` 轉成 16000 Hz。這步不能省，格式不對 whisper 就不會動。
+`overlay_subtitle.py` 把後半段抽成 `float_to_mono_16k`（只錄單一程式時拿到的已經是 float32，
+不用換算數值範圍），`live_transcribe.py` 那邊仍是完整的一份，行為要保持一致。
+
+**只錄單一程式的聲音（`--app`）。** 用 proc-tap 套件，背後是 Windows 10 2004 之後才有的
+「程式音訊迴路」：指定一個程序編號，只錄那個程序**和它底下的子程序**播出來的聲音
+（Discord 會開一堆子程序，所以一定要抓最上層那個，`find_app_pid` 在做這件事）。
+實測對無關的程式錄到的是完全靜音。啟動視窗的程式清單用 pycaw 列出「已經發出過聲音」的程式，
+Windows 要程式真的播過聲音才會有這筆資料，所以清單旁邊要有「重新整理」。
+指定 `--app` 時就不會去開 pyaudio 的 loopback 裝置，`--device` 會被忽略。
 
 **顯示卡跑不動時的退路。** `load_model` 在建立模型之後，一定要真的拿一段假聲音跑一次（程式裡叫 `warmup`）。
 原因是：光「建立模型」這個動作不會真的去載入顯示卡的函式庫，所以就算顯示卡環境是壞的，

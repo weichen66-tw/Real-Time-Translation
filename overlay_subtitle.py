@@ -28,6 +28,7 @@ Step 3: 遊戲即時字幕懸浮視窗
     py overlay_subtitle.py --lines 2          # 只顯示兩行
     py overlay_subtitle.py --list-devices     # 列出可抓的音訊裝置
     py overlay_subtitle.py --device CABLE     # 只抓 VB-Cable（隔絕遊戲音效）
+    py overlay_subtitle.py --app Discord.exe  # 只錄 Discord 的聲音，遊戲音效不會錄進來
 
 ⚠️ 遊戲必須設成「無邊框視窗」，全螢幕獨佔模式看不到字幕。
 """
@@ -132,13 +133,60 @@ def find_loopback(p, name_filter=None):
 
 
 def to_mono_16k(raw, rate, channels):
-    x = raw.astype(np.float32) / 32768.0
+    return float_to_mono_16k(raw.astype(np.float32) / 32768.0, rate, channels)
+
+
+def float_to_mono_16k(x, rate, channels):
+    """
+    to_mono_16k 的後半段，抽出來是因為只錄單一程式時（proc-tap）拿到的
+    已經是 float32，不用再換算數值範圍。
+    注意：live_transcribe.py 那邊的 to_mono_16k 仍是完整的一份，行為要一致。
+    """
     if channels > 1:
         x = x.reshape(-1, channels).mean(axis=1)
     if rate != TARGET_RATE:
         g = np.gcd(rate, TARGET_RATE)
         x = resample_poly(x, TARGET_RATE // g, rate // g)
     return x.astype(np.float32)
+
+
+def find_app_pid(name):
+    """
+    找出這個程式的「主程序」編號。同名的程序常常有好幾個（Discord 會開一堆子程序），
+    取最上層那個就好，錄音時連它底下的子程序都會一起錄到。
+    """
+    import psutil
+    wanted = name.lower()
+    procs = {}
+    for p in psutil.process_iter(["name", "ppid"]):
+        if (p.info["name"] or "").lower() == wanted:
+            procs[p.pid] = p
+    if not procs:
+        sys.exit(f"找不到正在執行的「{name}」。請先把它打開，再重新開始字幕。")
+    # 父程序也同名的話代表它是子程序，只留最上層、而且開最久的那一個
+    roots = [p for p in procs.values() if p.info["ppid"] not in procs] or list(procs.values())
+    return min(roots, key=lambda p: p.create_time()).pid
+
+
+def capture_app_worker(pid):
+    """
+    只錄指定程式（含其子程序）播出來的聲音，遊戲音效、其他程式都不會錄進來。
+    用的是 Windows 10 2004 之後才有的「程式音訊迴路」功能，
+    proc-tap 固定給 48000 Hz、立體聲、float32 的資料。
+    """
+    from proctap import ProcessAudioCapture, STANDARD_SAMPLE_RATE, STANDARD_CHANNELS
+    cap = ProcessAudioCapture(pid=pid)
+    cap.start()
+    try:
+        while True:
+            chunk = cap.read(timeout=1.0)
+            if not chunk:
+                continue        # 這段時間對方沒出聲，繼續等
+            audio_q.put(float_to_mono_16k(np.frombuffer(chunk, dtype=np.float32),
+                                          STANDARD_SAMPLE_RATE, STANDARD_CHANNELS))
+    finally:
+        cap.stop()
+        cap.close()
 
 
 def capture_worker(dev, rate, channels):
@@ -516,6 +564,7 @@ def main():
     n_lines = int(opt("--lines", 3))
     click_through = "--click-through" in args
     device_filter = opt("--device", None)
+    app_name = opt("--app", None)
     translator = opt("--translator", "google")
     max_segment = float(opt("--max-seconds", MAX_SEGMENT_SEC))
 
@@ -545,14 +594,19 @@ def main():
     print("載入模型中，第一次執行需下載，請稍候⋯")
     model = load_model(model_name, "--cpu" in args)
 
-    with pyaudio.PyAudio() as p:
-        dev = find_loopback(p, device_filter)
-        rate = int(dev["defaultSampleRate"])
-        channels = dev["maxInputChannels"]
-    print(f"裝置：{dev['name']}")
-
-    threading.Thread(target=capture_worker,
-                     args=(dev, rate, channels), daemon=True).start()
+    if app_name:
+        pid = find_app_pid(app_name)
+        print(f"聲音來源：只錄「{app_name}」這個程式（含子程序，編號 {pid}）")
+        capture = threading.Thread(target=capture_app_worker, args=(pid,), daemon=True)
+    else:
+        with pyaudio.PyAudio() as p:
+            dev = find_loopback(p, device_filter)
+            rate = int(dev["defaultSampleRate"])
+            channels = dev["maxInputChannels"]
+        print(f"裝置：{dev['name']}")
+        capture = threading.Thread(target=capture_worker,
+                                   args=(dev, rate, channels), daemon=True)
+    capture.start()
     threading.Thread(target=stt_worker,
                      args=(model, min_rms, max_segment), daemon=True).start()
     print(f"切段：安靜 {SILENCE_TO_FLUSH:.1f} 秒算講完，講不停最多 {max_segment:.0f} 秒切一段")

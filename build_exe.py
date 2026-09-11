@@ -5,7 +5,7 @@
     py build_exe.py
 
 需要先裝好：
-    py -m pip install pyinstaller pyaudiowpatch numpy scipy faster-whisper
+    py -m pip install pyinstaller pyaudiowpatch numpy scipy faster-whisper proc-tap pycaw
     py -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 
 產出：
@@ -55,6 +55,10 @@ def run_pyinstaller():
            "--collect-all", "faster_whisper",
            "--collect-all", "ctranslate2",
            "--collect-all", "onnxruntime",
+           "--collect-all", "proctap",      # 只錄單一程式的聲音（含它自己的 DLL）
+           "--collect-all", "pycaw",        # 列出正在發出聲音的程式
+           "--collect-all", "comtypes",
+           "--hidden-import", "psutil",
            *nvidia_binaries(),
            str(HERE / "launcher.py")]
     subprocess.run(cmd, cwd=HERE, check=True)
