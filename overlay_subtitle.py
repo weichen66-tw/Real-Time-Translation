@@ -64,7 +64,8 @@ SIDE_MARGIN = 120
 BOTTOM_MARGIN = 90
 
 # ── Gemini 翻譯設定 ───────────────────────────────────
-GEMINI_MODEL = "gemini-2.0-flash"   # 若失效，程式會自動列出可用型號
+GEMINI_MODEL = "gemini-flash-lite-latest"   # 若失效，程式會自動列出可用型號
+# 用 lite：非 lite 的型號會先「思考」，把下面 maxOutputTokens 的額度吃掉，翻譯會被切掉一半
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 HERE = Path(__file__).resolve().parent
