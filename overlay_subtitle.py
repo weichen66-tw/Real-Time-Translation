@@ -9,7 +9,8 @@ Step 3: 遊戲即時字幕懸浮視窗
 
 翻譯設定（可選，沒有就只顯示英文）：
     到 https://aistudio.google.com/apikey 申請免費 API key
-    在本檔案旁邊建立 gemini_key.txt，把 key 貼進去存檔
+    在本檔案旁邊建立 .env，寫入一行 GEMINI_API_KEY=你的key 存檔
+    （.env 已列在 .gitignore，不會被上傳到 GitHub）
 
 用法：
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
@@ -67,7 +68,7 @@ GEMINI_MODEL = "gemini-2.0-flash"   # 若失效，程式會自動列出可用型
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 HERE = Path(__file__).resolve().parent
-KEY_FILE = HERE / "gemini_key.txt"
+ENV_FILE = HERE / ".env"
 POS_FILE = HERE / "overlay_pos.json"
 TRANSCRIPT = HERE / "transcript.txt"
 
@@ -218,10 +219,15 @@ def stt_worker(model, min_rms):
 #  翻譯
 # ══════════════════════════════════════════════════════
 def read_key():
-    if KEY_FILE.exists():
-        k = KEY_FILE.read_text(encoding="utf-8").strip()
-        if k:
-            return k
+    """先找 .env 裡的 GEMINI_API_KEY=...，找不到再讀系統環境變數"""
+    if ENV_FILE.exists():
+        # utf-8-sig：記事本存檔可能在開頭多塞一個看不見的字元，這樣可以自動略過
+        for line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():
+            name, sep, value = line.partition("=")
+            if sep and name.strip() == "GEMINI_API_KEY":
+                k = value.strip().strip('"').strip("'")
+                if k:
+                    return k
     return os.environ.get("GEMINI_API_KEY", "").strip() or None
 
 
@@ -431,7 +437,7 @@ def main():
         print("翻譯：Gemini 已啟用")
     else:
         print("翻譯：未設定 key，只顯示英文")
-        print(f"      （要翻譯的話，建立 {KEY_FILE.name} 並貼入 API key）")
+        print(f"      （要翻譯的話，在 {ENV_FILE.name} 寫入 GEMINI_API_KEY=你的key）")
 
     print("載入模型中，第一次執行需下載，請稍候⋯")
     model = load_model(model_name, "--cpu" in args)
