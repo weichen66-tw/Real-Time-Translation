@@ -6,14 +6,21 @@ Step 3: 遊戲即時字幕懸浮視窗
 
 安裝：
     py -m pip install pyaudiowpatch numpy scipy faster-whisper
+    py -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"   # 有 NVIDIA 顯示卡才需要
 
-翻譯設定（可選，沒有就只顯示英文）：
-    到 https://aistudio.google.com/apikey 申請免費 API key
-    在本檔案旁邊建立 .env，寫入一行 GEMINI_API_KEY=你的key 存檔
-    （.env 已列在 .gitignore，不會被上傳到 GitHub）
+翻譯設定：
+    預設用 Google 翻譯，不用任何設定。
+    想改用 Gemini（翻得比較口語，但慢很多）：
+        到 https://aistudio.google.com/apikey 申請免費 API key
+        在本檔案旁邊建立 .env，寫入一行 GEMINI_API_KEY=你的key 存檔
+        （.env 已列在 .gitignore，不會被上傳到 GitHub）
+        執行時加上 --translator gemini
+
+一般使用者請直接雙擊 launcher.py（或打包好的 exe），用啟動視窗操作。
 
 用法：
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
+    py overlay_subtitle.py --translator gemini  # 改用 Gemini 翻譯
     py overlay_subtitle.py --click-through    # 滑鼠穿透，調好位置後用這個
     py overlay_subtitle.py --model base       # 換更快的模型
     py overlay_subtitle.py --min-rms 400      # 遊戲太吵時調高
@@ -31,13 +38,19 @@ import time
 import queue
 import ctypes
 import threading
+import http.client
 import tkinter as tk
 from pathlib import Path
 from datetime import datetime
 from urllib import request as urlrequest
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 
 from collections import deque
+
+# 第一次執行要從 Hugging Face 下載模型。它新版的下載方式（xet）實測會卡在 0% 不動，
+# 改用傳統的 HTTP 下載比較穩。一定要在 import faster_whisper 之前設定才有效。
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -67,8 +80,11 @@ BOTTOM_MARGIN = 90
 GEMINI_MODEL = "gemini-flash-lite-latest"   # 若失效，程式會自動列出可用型號
 # 用 lite：非 lite 的型號會先「思考」，把下面 maxOutputTokens 的額度吃掉，翻譯會被切掉一半
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+GOOGLE_HOST = "translate.googleapis.com"
 
-HERE = Path(__file__).resolve().parent
+# 打包成 exe 時，.env、字幕位置、逐字稿要放在 exe 旁邊，而不是解壓縮用的暫存資料夾
+HERE = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent)
 ENV_FILE = HERE / ".env"
 POS_FILE = HERE / "overlay_pos.json"
 TRANSCRIPT = HERE / "transcript.txt"
@@ -136,6 +152,19 @@ def capture_worker(dev, rate, channels):
 # ══════════════════════════════════════════════════════
 #  語音辨識
 # ══════════════════════════════════════════════════════
+def add_nvidia_dll_dirs():
+    """
+    pip 裝的 NVIDIA 元件（nvidia-cublas-cu12、nvidia-cudnn-cu12）把 DLL 放在
+    site-packages/nvidia/*/bin，Windows 預設不會去那裡找，要手動加進搜尋路徑，
+    否則會出現「cublas64_12.dll is not found」然後退回 CPU。
+    沒裝這些元件時什麼都不做。打包成 exe 後這些 DLL 也在 sys.path 底下，一樣找得到。
+    """
+    for p in sys.path:
+        for bin_dir in (Path(p) / "nvidia").glob("*/bin"):
+            os.add_dll_directory(str(bin_dir))
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
 def load_model(name, force_cpu=False):
     """
     先試 GPU，但必須「實際跑一次推論」成功才算數。
@@ -147,6 +176,7 @@ def load_model(name, force_cpu=False):
                           vad_filter=False)[0])
 
     if not force_cpu:
+        add_nvidia_dll_dirs()
         try:
             m = WhisperModel(name, device="cuda", compute_type="float16")
             warmup(m)
@@ -266,21 +296,61 @@ def show_available_models(key):
         print("列出型號失敗：", e)
 
 
+def google_translate(conn, text):
+    """
+    走 Google 翻譯網頁版背後的免費管道：不用金鑰，通常 0.1 秒內回來。
+    這不是 Google 正式對外的服務，哪天被擋掉就改用 --translator gemini。
+
+    conn 是這個翻譯執行緒自己的連線，重複使用可以省掉每次重新連線的時間
+    （不重複使用每句要多等 1～2 秒）。連線閒置太久會被 Google 關掉、
+    Google 偶爾也會回一次性的錯誤（例如 HTTP 500），這兩種情況都自動重試一次。
+    回傳 (翻譯結果, 連線)。
+    """
+    query = urlencode({"client": "gtx", "sl": "en", "tl": "zh-TW",
+                       "dt": "t", "q": text})
+    error = None
+    for _ in range(2):
+        if conn is None:
+            conn = http.client.HTTPSConnection(GOOGLE_HOST, timeout=10)
+        try:
+            conn.request("GET", f"/translate_a/single?{query}")
+            r = conn.getresponse()
+            body = r.read()
+        except (http.client.HTTPException, OSError) as e:
+            conn.close()
+            conn, error = None, e
+            continue
+        if r.status == 200:
+            pieces = json.loads(body)[0]
+            return "".join(p[0] for p in pieces if p[0]).strip(), conn
+        error = RuntimeError(f"Google 翻譯回應 HTTP {r.status}")
+    raise error
+
+
 MODEL_ERROR_REPORTED = threading.Event()
+GOOGLE_ERROR_REPORTED = threading.Event()
 
 
-def translate_worker(key):
+def translate_worker(translator, key):
+    conn = None          # 只有 Google 翻譯會用到，每個執行緒各自一條
     while True:
         seq, text = trans_q.get()
         try:
-            ui_q.put(("zh", seq, gemini_translate(key, text)))
+            if translator == "gemini":
+                zh = gemini_translate(key, text)
+            else:
+                zh, conn = google_translate(conn, text)
+            ui_q.put(("zh", seq, zh))
         except HTTPError as e:
             if e.code == 404 and not MODEL_ERROR_REPORTED.is_set():
                 MODEL_ERROR_REPORTED.set()
                 print(f"\n型號 {GEMINI_MODEL} 不可用。")
                 show_available_models(key)
             ui_q.put(("zh", seq, ""))
-        except Exception:
+        except Exception as e:
+            if translator == "google" and not GOOGLE_ERROR_REPORTED.is_set():
+                GOOGLE_ERROR_REPORTED.set()
+                print(f"\nGoogle 翻譯失敗（{e}）。一直失敗的話請改用 Gemini 翻譯。")
             ui_q.put(("zh", seq, ""))
 
 
@@ -428,17 +498,27 @@ def main():
     n_lines = int(opt("--lines", 3))
     click_through = "--click-through" in args
     device_filter = opt("--device", None)
+    translator = opt("--translator", "google")
 
     if "--list-devices" in args:
         list_loopback_devices()
         return
 
-    key = read_key()
-    if key:
-        print("翻譯：Gemini 已啟用")
+    if translator not in ("google", "gemini"):
+        sys.exit("--translator 只能是 google 或 gemini")
+
+    key = None
+    if translator == "google":
+        print("翻譯：Google 翻譯")
     else:
-        print("翻譯：未設定 key，只顯示英文")
-        print(f"      （要翻譯的話，在 {ENV_FILE.name} 寫入 GEMINI_API_KEY=你的key）")
+        key = read_key()
+        if key:
+            print("翻譯：Gemini 已啟用")
+        else:
+            print("翻譯：未設定 Gemini key，只顯示英文")
+            print(f"      （要翻譯的話，在 {ENV_FILE.name} 寫入 GEMINI_API_KEY=你的key，"
+                  f"或改用 Google 翻譯）")
+            translator = None
 
     print("載入模型中，第一次執行需下載，請稍候⋯")
     model = load_model(model_name, "--cpu" in args)
@@ -453,10 +533,10 @@ def main():
                      args=(dev, rate, channels), daemon=True).start()
     threading.Thread(target=stt_worker,
                      args=(model, min_rms), daemon=True).start()
-    if key:
+    if translator:
         for _ in range(2):
             threading.Thread(target=translate_worker,
-                             args=(key,), daemon=True).start()
+                             args=(translator, key), daemon=True).start()
 
     print("\n字幕視窗已開啟。")
     if click_through:

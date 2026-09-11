@@ -15,17 +15,27 @@
 ## 這個專案是什麼
 
 這是一套只能在 Windows 上跑的三階段流程：先把 Discord 或遊戲裡別人講話的聲音，從電腦的喇叭輸出端錄下來，
-交給 faster-whisper（一套語音轉文字的程式）聽成英文字，再送到 Google 的 Gemini 翻成中文，
+交給 faster-whisper（一套語音轉文字的程式）聽成英文字，再送去翻成中文（預設 Google 翻譯，可切換成 Gemini），
 最後用一條浮在遊戲畫面上的半透明字幕條顯示出來。
 
-這個專案沒有做成安裝包、不需要編譯、沒有自動測試、也沒有記錄套件清單的檔案——就是三支各自獨立的程式，
-直接用 `py` 指令執行。程式裡的註解和所有跑出來給人看的訊息都是繁體中文，之後修改也請維持這個習慣。
+一般使用者的入口是 `launcher.py`（啟動視窗）：用點的選設定、按「開始」，不用記指令參數。
+要給沒裝 Python 的朋友用時，用 `build_exe.py` 打包成 exe。
+這個專案沒有自動測試、也沒有記錄套件清單的檔案。
+程式裡的註解和所有跑出來給人看的訊息都是繁體中文，之後修改也請維持這個習慣。
 
 ## 指令
 
 ```powershell
 # 安裝需要的套件（專案裡沒有 requirements.txt，要自己手動裝）
 py -m pip install pyaudiowpatch numpy scipy faster-whisper
+py -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"   # 讓語音辨識用 NVIDIA 顯示卡
+py -m pip install pyinstaller                                  # 只有要打包 exe 才需要
+
+# 啟動視窗——一般使用就開這個
+py launcher.py
+
+# 打包成 exe，產出 dist/遊戲即時字幕/ 和 dist/遊戲即時字幕.zip（約數 GB，要跑好幾分鐘）
+py build_exe.py
 
 # 第一階段——先確認錄得到電腦播放的聲音；會產生 capture_test.wav
 py capture_test.py            # 錄 15 秒
@@ -41,6 +51,7 @@ py live_transcribe.py --list-devices
 py overlay_subtitle.py
 py overlay_subtitle.py --click-through --lines 2 --model base --min-rms 400
 py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可以避開遊戲音效
+py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
 ```
 
 第二、三階段共用的幾個選項：`--model`（選 whisper 模型大小，預設 `small`，越大越準但越慢）、
@@ -60,8 +71,21 @@ py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可�
 另外兩支存在的目的是分段找問題：如果字幕沒出來，就往回退一階，
 看看是「完全錄不到聲音」、還是「錄得到但聽不出文字」、還是「都好只是視窗沒顯示」。
 
-**這代表：** 只要修到 `find_loopback`、`to_mono_16k`、`load_model` 或聲音切段那段邏輯，
+**這代表：** 只要修到 `find_loopback`、`to_mono_16k`、`load_model`、`add_nvidia_dll_dirs` 或聲音切段那段邏輯，
 通常 `live_transcribe.py` 和 `overlay_subtitle.py` **兩個檔案都要改**，不能只改一邊。
+
+**啟動視窗（`launcher.py`）。** 它本身不做錄音或辨識，按「開始」時是另外開一個程序
+（程序 = 一個獨立在跑的程式）去跑 `overlay_subtitle.main()`，把畫面上的設定轉成
+`--model`、`--translator` 這些參數傳過去，再把對方印出來的訊息一行行接回來顯示在「執行紀錄」區，
+也靠這些訊息（例如「字幕視窗已開啟」）更新狀態列。所以**改 `overlay_subtitle.py` 印出來的文字時，
+要一起檢查 `launcher.py` 的 `update_status`**。按「停止」就直接把那個程序關掉。
+打包成 exe 後同一支 exe 身兼兩職：不帶參數是啟動視窗，帶 `--overlay` 就是字幕程序。
+啟動視窗記住的設定存在 `launcher_settings.json`，Gemini 金鑰從視窗填的話會寫進 `.env`。
+
+**打包 exe（`build_exe.py`）。** 用 PyInstaller（把 Python 程式連同需要的東西包成 exe 的工具）。
+pip 裝的 NVIDIA 元件 PyInstaller 不會自動收，要在 `nvidia_binaries()` 手動加，這些元件就佔了約 2GB。
+程式執行時產生的檔案（`.env`、`overlay_pos.json`、`transcript.txt`、`launcher_settings.json`）
+在 exe 版會存在 exe 旁邊（程式裡用 `sys.frozen` 判斷），壓縮檔會自動排除這些個人檔案。
 
 **多執行緒的分工（`overlay_subtitle.py`）。**
 （執行緒 = 讓程式同時做好幾件事的機制，可以想成同時有好幾個人在做不同工作。）
@@ -99,11 +123,22 @@ capture_worker ──audio_q──> stt_worker ──trans_q──> translate_wo
 這時候也不會報錯，要等到第一句話進來才爆掉。先跑一次假的，壞掉會當場發現，
 就能安靜地改用 CPU。兩支程式裡都有這段註解，請不要把這個行為改掉。
 
-**翻譯怎麼做的。** 沒有用 Google 官方的套件，是直接用 Python 內建的 `urllib` 送一個網路請求給
-Gemini 的 `generateContent` 網址。如果遇到 404（通常代表指定的 AI 模型已經被下架），
-程式只會提醒一次，並用 `show_available_models` 印出這把金鑰現在還能用哪些模型，
-方便你回去改檔案最上面的 `GEMINI_MODEL`。翻譯只要出任何問題，就當作沒翻到，
-字幕那一行顯示 `—`，英文字幕照常繼續跑，不會整個當掉。
+pip 裝的 NVIDIA 元件（cuBLAS、cuDNN）放在 `site-packages/nvidia/*/bin`，Windows 預設找不到，
+所以 `load_model` 試顯示卡之前會先呼叫 `add_nvidia_dll_dirs()` 把那些資料夾加進搜尋路徑。
+少了這步會出現 `cublas64_12.dll is not found`，然後默默退回 CPU（實測慢 14 倍）。
+
+**翻譯怎麼做的。** 兩種都沒有用官方套件，只用 Python 內建的網路功能：
+- **Google 翻譯（預設，`google_translate`）**：走 Google 翻譯網頁版背後的免費管道
+  `translate.googleapis.com/translate_a/single?client=gtx`，不用金鑰，通常 0.1 秒內回來。
+  **這不是 Google 正式對外的服務**，哪天可能被擋。每個翻譯執行緒會重複使用同一條連線
+  （不重複使用每句多等 1～2 秒），斷線或 Google 回一次性錯誤時會自動重試一次。
+- **Gemini（`gemini_translate`）**：送請求給 `generateContent` 網址。免費版伺服器很不穩，
+  實測一句 0.6～28 秒。模型要用 lite 版（目前 `gemini-flash-lite-latest`），
+  非 lite 版會先「思考」把 `maxOutputTokens` 吃光，翻譯被切一半。
+  如果遇到 404（通常代表模型被下架），程式只會提醒一次，並用 `show_available_models`
+  印出這把金鑰還能用哪些模型，方便回去改檔案最上面的 `GEMINI_MODEL`。
+
+翻譯只要出任何問題，就當作沒翻到，字幕那一行顯示 `—`，英文字幕照常繼續跑，不會整個當掉。
 
 **字幕視窗怎麼做的。** 用 Python 內建的 `tkinter`（做視窗介面的工具）把視窗邊框拿掉
 （`overrideredirect(True)`）、永遠釘在最上層（`-topmost`）、再調成半透明。
@@ -125,4 +160,6 @@ Gemini 的 `generateContent` 網址。如果遇到 404（通常代表指定的 A
 - `transcript.txt`（每次執行都會往後接的逐字稿）和 `overlay_pos.json`（記住字幕視窗位置）
   這兩個檔案是程式跑出來的，但也被上傳到 git 了。所以只要手動跑過程式，
   git 就會顯示這兩個檔案「有變動」，這是正常的。
-- `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）目前只列了 `.env` 和 `gemini_key.txt`。
+- `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）列了金鑰（`.env`、`gemini_key.txt`）、
+  `launcher_settings.json`，以及打包產生的 `build/`、`dist/`、`*.spec`、`__pycache__/`。
+- `dist/遊戲即時字幕/` 每次打包都會被整個清掉重做，不要把自己的東西放在裡面。

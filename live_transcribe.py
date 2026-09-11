@@ -13,6 +13,7 @@ Step 2: 即時滾動轉錄
 按 Ctrl+C 停止。逐字稿會存到腳本旁邊的 transcript.txt。
 """
 
+import os
 import sys
 import time
 import queue
@@ -21,6 +22,10 @@ from datetime import datetime
 from pathlib import Path
 
 from collections import deque
+
+# 第一次執行要從 Hugging Face 下載模型。它新版的下載方式（xet）實測會卡在 0% 不動，
+# 改用傳統的 HTTP 下載比較穩。一定要在 import faster_whisper 之前設定才有效。
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -99,6 +104,19 @@ def capture_thread(dev, rate, channels):
                 audio_q.put(to_mono_16k(raw, rate, channels))
 
 
+def add_nvidia_dll_dirs():
+    """
+    pip 裝的 NVIDIA 元件（nvidia-cublas-cu12、nvidia-cudnn-cu12）把 DLL 放在
+    site-packages/nvidia/*/bin，Windows 預設不會去那裡找，要手動加進搜尋路徑，
+    否則會出現「cublas64_12.dll is not found」然後退回 CPU。
+    沒裝這些元件時什麼都不做。
+    """
+    for p in sys.path:
+        for bin_dir in (Path(p) / "nvidia").glob("*/bin"):
+            os.add_dll_directory(str(bin_dir))
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
 def load_model(name: str, force_cpu: bool = False):
     """
     先試 GPU，但必須「實際跑一次推論」成功才算數。
@@ -111,6 +129,7 @@ def load_model(name: str, force_cpu: bool = False):
                           vad_filter=False)[0])
 
     if not force_cpu:
+        add_nvidia_dll_dirs()
         try:
             m = WhisperModel(name, device="cuda", compute_type="float16")
             warmup(m)
