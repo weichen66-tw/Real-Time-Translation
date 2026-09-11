@@ -15,6 +15,7 @@
 
 開發時：
     py launcher.py
+    py launcher.py --list-apps    # 排查用：列出目前發出過聲音的程式
 """
 
 import os
@@ -115,17 +116,51 @@ def list_devices():
         return []
 
 
-def list_audio_apps():
-    """
-    列出「已經發出過聲音」的程式名稱。Windows 只有在程式實際播過聲音之後
-    才會有這筆紀錄，所以剛開的程式可能還不在清單裡，要按「重新整理」再看一次。
-    """
+def list_sounding_apps():
+    """正在（或剛剛）發出聲音的程式。程式沒播過聲音時，Windows 這邊就查不到它"""
     try:
         from pycaw.pycaw import AudioUtilities
-        names = {s.Process.name() for s in AudioUtilities.GetAllSessions() if s.Process}
-        return sorted(names, key=str.lower)
+        return {s.Process.name() for s in AudioUtilities.GetAllSessions() if s.Process}
     except Exception:
-        return []
+        return set()
+
+
+def list_windowed_apps():
+    """有開視窗的程式。Discord 開著但還沒有人講話時，就是靠這個才選得到"""
+    try:
+        import psutil
+        user32 = ctypes.windll.user32
+        pids = set()
+
+        def collect(hwnd, _):
+            if user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd) > 0:
+                pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                pids.add(pid.value)
+            return True
+
+        proto = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        user32.EnumWindows(proto(collect), 0)
+        windows_dir = os.environ.get("SystemRoot", r"C:\Windows").lower()
+        names = set()
+        for pid in pids:
+            try:
+                p = psutil.Process(pid)
+                # 濾掉 Windows 自己的背景視窗（檔案總管、輸入法等），使用者不會想選它們
+                if not (p.exe() or "").lower().startswith(windows_dir):
+                    names.add(p.name())
+            except Exception:
+                pass
+        return names
+    except Exception:
+        return set()
+
+
+def list_apps():
+    """可以選的程式：正在發聲的排前面，後面接有開視窗的"""
+    sounding = sorted(list_sounding_apps(), key=str.lower)
+    windowed = sorted(list_windowed_apps() - set(sounding), key=str.lower)
+    return sounding + windowed
 
 
 def build_overlay_args(s):
@@ -195,7 +230,7 @@ class Launcher:
         refresh_app.grid(row=0, column=2, padx=(6, 0))
         self.inputs.append(refresh_app)
         self.add_hint(box, 1, "選 Discord 就只翻譯 Discord 的聲音，遊戲角色講話不會被翻。"
-                              "\n清單裡沒有的話，先讓那個程式發出一次聲音，再按「重新整理」")
+                              "\n清單裡沒有的話，先把那個程式打開，再按「重新整理」")
         self.refresh_apps(select=s["app"])
 
         self.device_var = tk.StringVar()
@@ -301,7 +336,7 @@ class Launcher:
         self.device_var.set(want if want in names else DEFAULT_DEVICE)
 
     def refresh_apps(self, select=None):
-        names = [NO_APP] + list_audio_apps()
+        names = [NO_APP] + list_apps()
         self.app_box.config(values=names)
         want = select or self.app_var.get()
         self.app_var.set(want if want in names else NO_APP)
@@ -481,6 +516,11 @@ def run_overlay(argv):
 def main():
     if "--overlay" in sys.argv:
         run_overlay(sys.argv[sys.argv.index("--overlay") + 1:])
+        return
+    if "--list-apps" in sys.argv:
+        # 排查用：下拉選單抓不到程式時，用這個確認是清單抓不到還是視窗的問題
+        for name in list_apps():
+            print(name)
         return
     try:
         # 讓視窗在高解析度螢幕上不會糊糊的（字幕程序是另一個程序，不受影響）
