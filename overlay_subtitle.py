@@ -4,6 +4,9 @@ Step 3: 遊戲即時字幕懸浮視窗
 畫面底部一條半透明長條，顯示最近幾句話（行數可用 --lines 調整）。
 英文先出現，中文翻譯隨後補上。
 
+字幕條可以用滑鼠拖到任何位置、拖右下角的握把調寬度；
+Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透），遊戲中也有效。
+
 安裝：
     py -m pip install pyaudiowpatch numpy scipy faster-whisper
     py -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"   # 有 NVIDIA 顯示卡才需要
@@ -22,7 +25,7 @@ Step 3: 遊戲即時字幕懸浮視窗
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
     py overlay_subtitle.py --translator gemini  # 改用 Gemini 翻譯
     py overlay_subtitle.py --max-seconds 5    # 講不停時最多 5 秒就切一段（預設 8）
-    py overlay_subtitle.py --click-through    # 滑鼠穿透，調好位置後用這個
+    py overlay_subtitle.py --click-through    # 一開始就鎖定（滑鼠穿透），之後可用 Ctrl+Alt+L 解鎖
     py overlay_subtitle.py --model base       # 換更快的模型
     py overlay_subtitle.py --min-rms 400      # 遊戲太吵時調高
     py overlay_subtitle.py --lines 2          # 只顯示兩行
@@ -80,6 +83,9 @@ OPACITY = 0.82
 BAR_HEIGHT_PER_LINE = 52
 SIDE_MARGIN = 120
 BOTTOM_MARGIN = 90
+MIN_WIDTH = 320               # 字幕條最窄能拉到多少
+MOVE_STEP = 20                # 快速鍵一次移動幾點
+HOTKEY_HELP = "快速鍵：Ctrl+Alt+方向鍵 移動字幕、Ctrl+Alt+L 鎖定／解鎖（遊戲中也有效）"
 
 # ── Gemini 翻譯設定 ───────────────────────────────────
 GEMINI_MODEL = "gemini-flash-lite-latest"   # 若失效，程式會自動列出可用型號
@@ -444,10 +450,44 @@ def translate_worker(translator, key):
 # ══════════════════════════════════════════════════════
 #  懸浮視窗
 # ══════════════════════════════════════════════════════
+def hotkey_worker(cmd_q):
+    """
+    註冊全系統的快速鍵，這樣遊戲在前景、或字幕鎖定（滑鼠穿透）時也按得到。
+    Windows 的規定：註冊和收訊息一定要在同一個執行緒，所以兩件事都在這裡做。
+    按下後只把「要做什麼」丟進佇列，真正動視窗由畫面主執行緒處理。
+    """
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT = 0x0001, 0x0002, 0x4000
+    WM_HOTKEY = 0x0312
+    VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_L = 0x25, 0x26, 0x27, 0x28, 0x4C
+    # 方向鍵不加 NOREPEAT，按著不放就會一直移動
+    keys = {
+        1: (MOD_CONTROL | MOD_ALT, VK_LEFT, ("move", -MOVE_STEP, 0)),
+        2: (MOD_CONTROL | MOD_ALT, VK_RIGHT, ("move", MOVE_STEP, 0)),
+        3: (MOD_CONTROL | MOD_ALT, VK_UP, ("move", 0, -MOVE_STEP)),
+        4: (MOD_CONTROL | MOD_ALT, VK_DOWN, ("move", 0, MOVE_STEP)),
+        5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_L, ("lock", 0, 0)),
+    }
+    user32 = ctypes.windll.user32
+    actions = {}
+    for hotkey_id, (mods, vk, action) in keys.items():
+        if user32.RegisterHotKey(None, hotkey_id, mods, vk):
+            actions[hotkey_id] = action
+    if len(actions) < len(keys):
+        print("部分快速鍵被其他程式佔用了，只有部分能用")
+    if not actions:
+        return
+    msg = wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+        if msg.message == WM_HOTKEY and msg.wParam in actions:
+            cmd_q.put(actions[msg.wParam])
+
+
 class Overlay:
     def __init__(self, n_lines, click_through):
         self.n = n_lines
         self.entries = []          # [{seq, en, zh}]
+        self.locked = click_through
+        self.cmd_q = queue.Queue()  # 快速鍵按下後要做的事
 
         self.root = tk.Tk()
         self.root.title("Game Subtitles")
@@ -458,12 +498,12 @@ class Overlay:
 
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        self.w = sw - SIDE_MARGIN * 2
         self.h = BAR_HEIGHT_PER_LINE * n_lines
-        x, y = self.load_pos(default=(SIDE_MARGIN, sh - self.h - BOTTOM_MARGIN))
-        self.root.geometry(f"{self.w}x{self.h}+{x}+{y}")
+        self.w, self.x, self.y = self.load_pos(sw - SIDE_MARGIN * 2, SIDE_MARGIN,
+                                               sh - self.h - BOTTOM_MARGIN)
+        self.root.geometry(f"{self.w}x{self.h}+{self.x}+{self.y}")
         # 底邊固定，內容變多時視窗往上長，字幕位置才不會亂跳
-        self.bottom_y = y + self.h
+        self.bottom_y = self.y + self.h
 
         self.rows = []
         for _ in range(n_lines):
@@ -477,26 +517,36 @@ class Overlay:
             zh.pack(fill="x")
             self.rows.append((en, zh))
 
-        if click_through:
-            self.root.after(300, self.make_click_through)
-        else:
-            self.bind_drag()
+        # 右下角的握把：拖它可以調字幕條的寬度
+        self.grip = tk.Label(self.root, text="◢", font=("Segoe UI", 9),
+                             fg="#5c6270", bg=BG_COLOR, cursor="size_nw_se")
+        self.grip.bind("<Button-1>", self.resize_press)
+        self.grip.bind("<B1-Motion>", self.resize_drag)
+        self.grip.bind("<ButtonRelease-1>", lambda _: self.save_pos())
+
+        self.bind_drag()
+        # 等視窗真的建立好才能改它的屬性，所以延後一下
+        self.root.after(300, lambda: self.set_locked(self.locked, quiet=True))
+        threading.Thread(target=hotkey_worker, args=(self.cmd_q,), daemon=True).start()
 
         self.root.after(100, self.poll)
+        self.root.after(50, self.handle_hotkeys)
 
-    # ── 位置記憶 ──
-    def load_pos(self, default):
+    # ── 位置與大小記憶 ──
+    def load_pos(self, default_w, default_x, default_y):
+        """回傳 (寬度, x, y)；記住的位置不在目前螢幕上就回到預設位置"""
         try:
             d = json.loads(POS_FILE.read_text())
+            w = max(MIN_WIDTH, int(d.get("w", default_w)))
             x, y = int(d["x"]), int(d["y"])
         except Exception:
-            return default
-        if not self.on_any_monitor(x + self.w // 2, y + self.h // 2):
+            return default_w, default_x, default_y
+        if not self.on_any_monitor(x + w // 2, y + self.h // 2):
             # 上次拖到的外接螢幕現在沒接，照舊開會跑到畫面外看不到；
             # 位置檔不動，下次接回那台螢幕時字幕就會回到原處
             print("上次的字幕位置不在目前的螢幕上（外接螢幕沒接？），先顯示在預設位置")
-            return default
-        return x, y
+            return w, default_x, default_y
+        return w, x, y
 
     @staticmethod
     def on_any_monitor(x, y):
@@ -507,40 +557,104 @@ class Overlay:
         user32.MonitorFromPoint.restype = wintypes.HMONITOR
         return bool(user32.MonitorFromPoint(wintypes.POINT(x, y), MONITOR_DEFAULTTONULL))
 
+    @staticmethod
+    def desktop_bounds():
+        """所有螢幕合起來的範圍，用來擋住字幕被移到畫面外"""
+        metric = ctypes.windll.user32.GetSystemMetrics
+        left, top = metric(76), metric(77)
+        return left, top, left + metric(78), top + metric(79)
+
     def save_pos(self):
         try:
-            POS_FILE.write_text(json.dumps(
-                {"x": self.root.winfo_x(), "y": self.root.winfo_y()}))
+            POS_FILE.write_text(json.dumps({"x": self.x, "y": self.y, "w": self.w}))
         except Exception:
             pass
 
     # ── 拖曳移動 ──
+    def draggable_widgets(self):
+        """
+        視窗本身加上裡面每一個元件。一定要全部綁：字幕文字外面還包了一層框，
+        漏掉那層的話，點到文字周邊的空白（字幕還沒出現時就是一大片空白）會拖不動。
+        右下角的握把要排除，它負責調寬度。
+        """
+        found, stack = [self.root], [self.root]
+        while stack:
+            for child in stack.pop().winfo_children():
+                found.append(child)
+                stack.append(child)
+        return [w for w in found if w is not self.grip]
+
     def bind_drag(self):
         def press(e):
-            self._dx, self._dy = e.x_root - self.root.winfo_x(), \
-                                 e.y_root - self.root.winfo_y()
+            self._dx, self._dy = e.x_root - self.x, e.y_root - self.y
 
         def drag(e):
-            self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
+            self.place_at(e.x_root - self._dx, e.y_root - self._dy)
 
         def release(_):
-            self.bottom_y = self.root.winfo_y() + self.root.winfo_height()
             self.save_pos()
 
-        for w in [self.root] + [x for r in self.rows for x in r]:
+        for w in self.draggable_widgets():
             w.bind("<Button-1>", press)
             w.bind("<B1-Motion>", drag)
             w.bind("<ButtonRelease-1>", release)
         self.root.bind("<Escape>", lambda _: self.root.destroy())
 
-    # ── 滑鼠穿透 ──
-    def make_click_through(self):
+    def place_at(self, x, y):
+        """
+        移到 (x, y)，但不讓它跑出所有螢幕的範圍之外。
+        自己記住座標（self.x / self.y），不去問視窗現在在哪裡：
+        剛下完移動指令時 Windows 還沒更新那個值，連續移動會算錯、存檔會存到舊位置。
+        """
+        left, top, right, bottom = self.desktop_bounds()
+        h = self.root.winfo_height()
+        self.x = max(left, min(x, right - self.w))
+        self.y = max(top, min(y, bottom - h))
+        self.root.geometry(f"+{self.x}+{self.y}")
+        self.bottom_y = self.y + h
+
+    # ── 調整寬度 ──
+    def resize_press(self, e):
+        self._grip_offset = e.x_root - self.w
+
+    def resize_drag(self, e):
+        left, _, right, _ = self.desktop_bounds()
+        want = e.x_root - self._grip_offset
+        self.w = max(MIN_WIDTH, min(want, right - left))
+        self.render()          # 換行寬度也要跟著變，所以重新排版一次
+
+    # ── 鎖定（滑鼠穿透）──
+    def set_locked(self, locked, quiet=False):
+        """
+        鎖定 = 滑鼠穿透：滑鼠點得到後面的遊戲，但字幕不能拖也不能調大小。
+        用 Ctrl+Alt+L 可以隨時切換，遊戲玩到一半也能改。
+        """
+        self.locked = locked
         GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
+        user32 = ctypes.windll.user32
         # 沒有邊框的視窗有時候問不到外層視窗，那就直接用自己的
-        hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
-        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        ctypes.windll.user32.SetWindowLongW(
-            hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+        hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED
+        style = style | WS_EX_TRANSPARENT if locked else style & ~WS_EX_TRANSPARENT
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        if locked:
+            self.grip.place_forget()
+        else:
+            self.grip.place(relx=1.0, rely=1.0, anchor="se")
+        if not quiet:
+            print("字幕已鎖定：滑鼠可以穿透，改用快速鍵移動" if locked
+                  else "字幕已解鎖：可以用滑鼠拖曳，右下角握把可以調寬度")
+
+    # ── 快速鍵 ──
+    def handle_hotkeys(self):
+        while not self.cmd_q.empty():
+            action, dx, dy = self.cmd_q.get()
+            if action == "move":
+                self.place_at(self.x + dx, self.y + dy)
+                self.save_pos()
+            else:
+                self.set_locked(not self.locked)
+        self.root.after(50, self.handle_hotkeys)
 
     # ── 更新畫面 ──
     def poll(self):
@@ -578,8 +692,8 @@ class Overlay:
         need = self.root.winfo_reqheight()
         if need <= 0:
             return
-        x = self.root.winfo_x()
-        self.root.geometry(f"{self.w}x{need}+{x}+{self.bottom_y - need}")
+        self.y = self.bottom_y - need
+        self.root.geometry(f"{self.w}x{need}+{self.x}+{self.y}")
 
     def run(self):
         self.root.mainloop()
@@ -655,9 +769,11 @@ def main():
 
     print("\n字幕視窗已開啟。")
     if click_through:
-        print("滑鼠穿透模式：無法拖曳，關閉請回這個視窗按 Ctrl+C")
+        print("目前是鎖定狀態：滑鼠會穿透字幕，用快速鍵移動")
     else:
-        print("可以用滑鼠拖曳視窗，位置會自動記住。按 Esc 關閉。")
+        print("可以直接用滑鼠拖曳字幕，右下角的握把可以調寬度。按 Esc 關閉。")
+    print(HOTKEY_HELP)
+    print("位置和寬度都會自動記住")
     print("⚠️ 遊戲請設成「無邊框視窗」，全螢幕獨佔看不到字幕\n")
 
     Overlay(n_lines, click_through).run()

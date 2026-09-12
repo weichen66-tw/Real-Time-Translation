@@ -155,10 +155,25 @@ pip 裝的 NVIDIA 元件（cuBLAS、cuDNN）放在 `site-packages/nvidia/*/bin`�
 **字幕視窗怎麼做的。** 用 Python 內建的 `tkinter`（做視窗介面的工具）把視窗邊框拿掉
 （`overrideredirect(True)`）、永遠釘在最上層（`-topmost`）、再調成半透明。
 視窗的底邊是固定的（程式裡的 `self.bottom_y`），字太多需要換行時，視窗會往上長，
-這樣字幕才不會上下亂跳。用滑鼠拖曳後放開，位置會存進 `overlay_pos.json`，下次開啟會記得。
+這樣字幕才不會上下亂跳。位置和寬度存在 `overlay_pos.json`（`x`、`y`、`w`），下次開啟會記得。
 
-加上 `--click-through` 之後，會透過 `ctypes` 幫視窗掛上 `WS_EX_LAYERED | WS_EX_TRANSPARENT` 這兩個屬性，
-讓滑鼠可以直接穿過字幕點到後面的遊戲——但代價是從此不能再拖曳視窗，也不能按 Esc 關掉。
+**移動與大小。** 位置一律由 `self.x`／`self.y` 記著，**不要改成去問 `winfo_x()`**：
+剛下完移動指令時 Windows 還沒更新那個值，連續移動（按住快速鍵）會算錯、
+移完馬上存檔會存到舊位置，這兩個問題都發生過。`place_at` 負責移動並夾在所有螢幕範圍內，
+`fit_height` 改高度時也要同步更新 `self.y`。
+拖曳一定要綁到 `draggable_widgets()` 回傳的**每一個**元件：字幕文字外面還包了一層 Frame，
+漏掉它的話，點到文字周邊的空白就拖不動（早期就是只綁 root 和 Label，使用者反映「拖不動」）。
+右下角的握把（`self.grip`）負責調寬度，所以要從拖曳清單排除。
+
+**鎖定（滑鼠穿透）。** `set_locked()` 用 `ctypes` 加上或移除 `WS_EX_TRANSPARENT`，
+所以可以隨時切換，不必重開。鎖定時滑鼠會穿過字幕點到遊戲，代價是不能拖曳、不能按 Esc，
+握把也會收起來。`--click-through` 只是決定「一開始是不是鎖定」。
+
+**快速鍵。** `hotkey_worker` 用 `RegisterHotKey` 註冊全系統快速鍵
+（Ctrl+Alt+方向鍵移動、Ctrl+Alt+L 切換鎖定），這樣遊戲在前景或字幕鎖定時也按得到。
+Windows 規定註冊和收訊息要在同一個執行緒，所以兩件事都在那個執行緒裡；
+按鍵只丟指令進 `cmd_q`，真正動視窗的是畫面主執行緒的 `handle_hotkeys`
+（tkinter 的東西只能在主執行緒動）。
 
 **注意：** 遊戲如果開「全螢幕獨佔」模式，是看不到字幕的，一定要設成「無邊框視窗」。
 

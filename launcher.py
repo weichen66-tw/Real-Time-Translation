@@ -56,8 +56,9 @@ DEFAULTS = {"device": DEFAULT_DEVICE, "app": NO_APP, "translator": "google", "mo
 
 TIPS = ("① 遊戲請設成「無邊框視窗」（全螢幕獨佔會看不到字幕）\n"
         "② 選好下面的設定，按「開始」\n"
-        "③ 字幕出現後，用滑鼠把它拖到喜歡的位置（會自動記住）\n"
-        "④ 位置調好後，可以勾「滑鼠穿透」再重新開始，字幕就不會擋到遊戲操作")
+        "③ 用滑鼠把字幕拖到喜歡的位置，拖右下角的握把 ◢ 可以調寬度（都會自動記住）\n"
+        "④ 遊戲中隨時可用：Ctrl+Alt+方向鍵 移動字幕、Ctrl+Alt+L 鎖定／解鎖\n"
+        "　　（鎖定＝滑鼠穿透，不會擋到遊戲操作）")
 
 
 # ══════════════════════════════════════════════════════
@@ -274,7 +275,7 @@ class Launcher:
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
         check = ttk.Checkbutton(box, variable=self.click_var,
-                                text="滑鼠穿透（不會擋到遊戲操作，但字幕不能拖曳，要按「停止」才能關）")
+                                text="一開始就鎖定字幕（滑鼠穿透，不會擋到遊戲操作；隨時可按 Ctrl+Alt+L 解鎖）")
         check.grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
