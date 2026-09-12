@@ -8,6 +8,9 @@ launcher_settings.json
 # 逐字稿：裡面是實際聽到的對話內容，屬於個人資料，不要上傳
 transcript.txt
 
+# 字幕視窗被拖到哪裡（每台電腦、每種螢幕配置都不一樣）
+overlay_pos.json
+
 # 打包 exe 時產生的檔案（好幾 GB）
 build/
 dist/
