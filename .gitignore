@@ -5,6 +5,9 @@ gemini_key.txt
 # 啟動視窗記住的個人設定
 launcher_settings.json
 
+# 逐字稿：裡面是實際聽到的對話內容，屬於個人資料，不要上傳
+transcript.txt
+
 # 打包 exe 時產生的檔案（好幾 GB）
 build/
 dist/
