@@ -341,10 +341,13 @@ class Launcher:
         want = select or self.app_var.get()
         self.app_var.set(want if want in names else NO_APP)
 
+    def is_running(self):
+        return self.proc is not None and self.proc.poll() is None
+
     def refresh_source_state(self):
         """指定了程式之後，「聲音來源」就用不到了，把它變灰避免誤會"""
         whole_pc = self.app_var.get() == NO_APP
-        running = self.proc is not None and self.proc.poll() is None
+        running = self.is_running()
         for w in (self.device_box, self.device_refresh):
             w.state(["!disabled"] if whole_pc and not running else ["disabled"])
         self.device_hint.config(
@@ -353,7 +356,7 @@ class Launcher:
 
     def refresh_key_state(self):
         using_gemini = TRANSLATORS[self.translator_var.get()] == "gemini"
-        running = self.proc is not None and self.proc.poll() is None
+        running = self.is_running()
         self.key_entry.state(["!disabled"] if using_gemini and not running else ["disabled"])
         if not using_gemini:
             self.key_hint.config(text="用 Google 翻譯不需要金鑰")
@@ -409,7 +412,7 @@ class Launcher:
 
     # ── 開始／停止 ──
     def start(self):
-        if self.proc and self.proc.poll() is None:
+        if self.is_running():
             return
         s = self.read_form()
         if s["translator"] == "gemini" and not self.ensure_gemini_key():
@@ -437,7 +440,7 @@ class Launcher:
         threading.Thread(target=self.pump, args=(self.proc,), daemon=True).start()
 
     def stop(self):
-        if self.proc and self.proc.poll() is None:
+        if self.is_running():
             self.stopping = True
             self.status_var.set("停止中⋯")
             self.proc.terminate()

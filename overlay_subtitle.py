@@ -1,7 +1,7 @@
 """
 Step 3: 遊戲即時字幕懸浮視窗
 
-畫面底部一條半透明長條，顯示最近三句話。
+畫面底部一條半透明長條，顯示最近幾句話（行數可用 --lines 調整）。
 英文先出現，中文翻譯隨後補上。
 
 安裝：
@@ -68,6 +68,7 @@ MIN_SEGMENT_SEC = 0.4
 PREROLL_SEC = 0.5             # 永遠保留這麼長的前置音，避免吃掉句子開頭
 MAX_SEGMENT_SEC = 8.0         # 對方講不停時，最多幾秒就先切一段送出（--max-seconds 可調）
 MAX_SEGMENT_RANGE = (2.0, 30.0)
+APP_ALIVE_CHECK_SEC = 5.0     # 用 --app 指定程式時，每隔多久確認那個程式還開著
 
 # ── 外觀設定 ──────────────────────────────────────────
 BG_COLOR = "#0b0b0f"
@@ -143,7 +144,8 @@ def float_to_mono_16k(x, rate, channels):
     注意：live_transcribe.py 那邊的 to_mono_16k 仍是完整的一份，行為要一致。
     """
     if channels > 1:
-        x = x.reshape(-1, channels).mean(axis=1)
+        # 先切掉尾巴湊不成一組的樣本，否則 reshape 會整個錯誤，錄音就斷了
+        x = x[:len(x) // channels * channels].reshape(-1, channels).mean(axis=1)
     if rate != TARGET_RATE:
         g = np.gcd(rate, TARGET_RATE)
         x = resample_poly(x, TARGET_RATE // g, rate // g)
@@ -157,33 +159,46 @@ def find_app_pid(name):
     """
     import psutil
     wanted = name.lower()
-    procs = {}
-    for p in psutil.process_iter(["name", "ppid"]):
-        if (p.info["name"] or "").lower() == wanted:
-            procs[p.pid] = p
+    # 存 info 快照而不是存程序物件：程序隨時可能結束，之後再去問它就會出錯
+    procs = {p.pid: p.info for p in psutil.process_iter(["name", "ppid", "create_time"])
+             if (p.info["name"] or "").lower() == wanted}
     if not procs:
         sys.exit(f"找不到正在執行的「{name}」。請先把它打開，再重新開始字幕。")
     # 父程序也同名的話代表它是子程序，只留最上層、而且開最久的那一個
-    roots = [p for p in procs.values() if p.info["ppid"] not in procs] or list(procs.values())
-    return min(roots, key=lambda p: p.create_time()).pid
+    roots = [item for item in procs.items() if item[1]["ppid"] not in procs] or list(procs.items())
+    return min(roots, key=lambda item: item[1]["create_time"] or 0)[0]
 
 
-def capture_app_worker(pid):
+def capture_app_worker(pid, app_name):
     """
     只錄指定程式（含其子程序）播出來的聲音，遊戲音效、其他程式都不會錄進來。
     用的是 Windows 10 2004 之後才有的「程式音訊迴路」功能，
     proc-tap 固定給 48000 Hz、立體聲、float32 的資料。
     """
+    import psutil
     from proctap import ProcessAudioCapture, STANDARD_SAMPLE_RATE, STANDARD_CHANNELS
-    cap = ProcessAudioCapture(pid=pid)
-    cap.start()
     try:
+        cap = ProcessAudioCapture(pid=pid)
+        cap.start()
+    except Exception as e:
+        print(f"無法錄「{app_name}」的聲音（{type(e).__name__}：{e}）。"
+              f"請確認它還開著，或把「只翻譯這個程式」改回不指定。")
+        return
+    try:
+        next_check = time.time() + APP_ALIVE_CHECK_SEC
         while True:
             chunk = cap.read(timeout=1.0)
-            if not chunk:
-                continue        # 這段時間對方沒出聲，繼續等
-            audio_q.put(float_to_mono_16k(np.frombuffer(chunk, dtype=np.float32),
-                                          STANDARD_SAMPLE_RATE, STANDARD_CHANNELS))
+            if chunk:
+                audio_q.put(float_to_mono_16k(np.frombuffer(chunk, dtype=np.float32),
+                                              STANDARD_SAMPLE_RATE, STANDARD_CHANNELS))
+            # 程式關掉後這裡「不會」停止收到資料，只是收到的都是無聲的，
+            # 所以不能靠「沒資料」判斷，要定時主動確認那個程式還在不在
+            if time.time() >= next_check:
+                next_check = time.time() + APP_ALIVE_CHECK_SEC
+                if not psutil.pid_exists(pid):
+                    print(f"「{app_name}」已經關閉，不會再有字幕了。"
+                          f"重新打開它之後，請按「停止」再按「開始」。")
+                    return
     finally:
         cap.stop()
         cap.close()
@@ -242,12 +257,34 @@ def load_model(name, force_cpu=False):
     return m
 
 
+def open_transcript():
+    """
+    逐字稿寫不進去也要照常跑（例如 exe 被放在 Program Files 這種不能寫入的資料夾）。
+    以前寫不進去會讓整個辨識停掉，字幕完全不動又看不出原因。
+    """
+    try:
+        out = TRANSCRIPT.open("a", encoding="utf-8")
+        out.write(f"\n===== {datetime.now():%Y-%m-%d %H:%M} =====\n")
+        out.flush()
+        return out
+    except OSError as e:
+        print(f"逐字稿存不了（{e}）。字幕照常顯示，只是不會留下紀錄。")
+        return None
+
+
 def stt_worker(model, min_rms, max_segment):
     buffer, speaking, silence_start, seq = [], False, None, 0
     preroll, preroll_n = deque(), 0
-    out = TRANSCRIPT.open("a", encoding="utf-8")
-    out.write(f"\n===== {datetime.now():%Y-%m-%d %H:%M} =====\n")
-    out.flush()
+    out = open_transcript()
+
+    def record(text):
+        if out is None:
+            return
+        try:
+            out.write(f"[{datetime.now():%H:%M:%S}] {text}\n")
+            out.flush()
+        except OSError:
+            pass                # 硬碟滿了之類的，字幕還是要繼續跑
 
     def flush():
         nonlocal buffer, speaking, seq
@@ -266,8 +303,7 @@ def stt_worker(model, min_rms, max_segment):
         seq += 1
         ui_q.put(("new", seq, text))
         trans_q.put((seq, text))
-        out.write(f"[{datetime.now():%H:%M:%S}] {text}\n")
-        out.flush()
+        record(text)
 
     while True:
         block = audio_q.get()
@@ -500,7 +536,8 @@ class Overlay:
     # ── 滑鼠穿透 ──
     def make_click_through(self):
         GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
-        hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+        # 沒有邊框的視窗有時候問不到外層視窗，那就直接用自己的
+        hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
         style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         ctypes.windll.user32.SetWindowLongW(
             hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
@@ -597,7 +634,8 @@ def main():
     if app_name:
         pid = find_app_pid(app_name)
         print(f"聲音來源：只錄「{app_name}」這個程式（含子程序，編號 {pid}）")
-        capture = threading.Thread(target=capture_app_worker, args=(pid,), daemon=True)
+        capture = threading.Thread(target=capture_app_worker,
+                                   args=(pid, app_name), daemon=True)
     else:
         with pyaudio.PyAudio() as p:
             dev = find_loopback(p, device_filter)
