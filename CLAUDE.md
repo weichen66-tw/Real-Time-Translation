@@ -143,14 +143,22 @@ pip 裝的 NVIDIA 元件（cuBLAS、cuDNN）放在 `site-packages/nvidia/*/bin`�
 - **Google 翻譯（預設，`google_translate`）**：走 Google 翻譯網頁版背後的免費管道
   `translate.googleapis.com/translate_a/single?client=gtx`，不用金鑰，通常 0.1 秒內回來。
   **這不是 Google 正式對外的服務**，哪天可能被擋。每個翻譯執行緒會重複使用同一條連線
-  （不重複使用每句多等 1～2 秒），斷線或 Google 回一次性錯誤時會自動重試一次。
+  （不重複使用每句多等 1～2 秒）。斷線、Google 回錯誤（例如送太快被擋的 429）、
+  或回了空白結果時，會照 `GOOGLE_RETRY_WAITS` 先等 0.5 秒、再等 1 秒重試，一句最多試 3 次。
+  不馬上重試是因為被擋或網路卡住時，馬上再送通常也是失敗。
 - **Gemini（`gemini_translate`）**：送請求給 `generateContent` 網址。免費版伺服器很不穩，
   實測一句 0.6～28 秒。模型要用 lite 版（目前 `gemini-flash-lite-latest`），
   非 lite 版會先「思考」把 `maxOutputTokens` 吃光，翻譯被切一半。
   如果遇到 404（通常代表模型被下架），程式只會提醒一次，並用 `show_available_models`
   印出這把金鑰還能用哪些模型，方便回去改檔案最上面的 `GEMINI_MODEL`。
 
-翻譯只要出任何問題，就當作沒翻到，字幕那一行顯示 `—`，英文字幕照常繼續跑，不會整個當掉。
+**Google 沒翻到時改用 Gemini 補翻。** 選 Google 翻譯時，程式一樣會讀 Gemini 金鑰；
+有金鑰的話，Google 試完 3 次還是失敗的句子，會先在字幕顯示「改用 Gemini 補翻中⋯」，再交給 Gemini 翻。
+沒有金鑰就不補翻。只有 Gemini 當備援，不要自己加其他需要另外申請授權的翻譯服務。
+
+翻譯只要最後還是失敗，就當作沒翻到，字幕那一行顯示 `—`，英文字幕照常繼續跑，不會整個當掉。
+每一次失敗都會印出「第幾句、哪個翻譯、什麼原因、那句英文的開頭」，會出現在啟動視窗的「執行紀錄」，
+方便查是被擋、斷線還是空白結果（`try_google`、`try_gemini`）。
 
 **字幕視窗怎麼做的。** 用 Python 內建的 `tkinter`（做視窗介面的工具）把視窗邊框拿掉
 （`overrideredirect(True)`）、永遠釘在最上層（`-topmost`）、再調成半透明。

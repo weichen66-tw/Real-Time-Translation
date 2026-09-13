@@ -13,6 +13,7 @@ Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透
 
 翻譯設定：
     預設用 Google 翻譯，不用任何設定。
+    有設定 Gemini 金鑰的話，Google 沒翻到的句子會自動改用 Gemini 補翻。
     想改用 Gemini（翻得比較口語，但慢很多）：
         到 https://aistudio.google.com/apikey 申請免費 API key
         在本檔案旁邊建立 .env，寫入一行 GEMINI_API_KEY=你的key 存檔
@@ -92,6 +93,7 @@ GEMINI_MODEL = "gemini-flash-lite-latest"   # 若失效，程式會自動列出�
 # 用 lite：非 lite 的型號會先「思考」，把下面 maxOutputTokens 的額度吃掉，翻譯會被切掉一半
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 GOOGLE_HOST = "translate.googleapis.com"
+GOOGLE_RETRY_WAITS = (0.5, 1.0)   # Google 失敗後依序等這麼久再試，所以一句最多試 3 次
 
 # 打包成 exe 時，.env、字幕位置、逐字稿要放在 exe 旁邊，而不是解壓縮用的暫存資料夾
 HERE = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
@@ -396,13 +398,17 @@ def google_translate(conn, text):
 
     conn 是這個翻譯執行緒自己的連線，重複使用可以省掉每次重新連線的時間
     （不重複使用每句要多等 1～2 秒）。連線閒置太久會被 Google 關掉、
-    Google 偶爾也會回一次性的錯誤（例如 HTTP 500），這兩種情況都自動重試一次。
-    回傳 (翻譯結果, 連線)。
+    Google 偶爾也會回一次性的錯誤（例如 HTTP 500、送太快被擋的 429），
+    或是回了結果卻沒有譯文。這些情況都照 GOOGLE_RETRY_WAITS 等一下再重試，
+    不馬上重試是因為被擋或網路卡住時，馬上再送通常也是失敗。
+    回傳 (翻譯結果, 連線)；試完都失敗就丟出錯誤，錯誤訊息是最後一次失敗的原因。
     """
     query = urlencode({"client": "gtx", "sl": "en", "tl": "zh-TW",
                        "dt": "t", "q": text})
     error = None
-    for _ in range(2):
+    for attempt in range(len(GOOGLE_RETRY_WAITS) + 1):
+        if attempt:
+            time.sleep(GOOGLE_RETRY_WAITS[attempt - 1])
         if conn is None:
             conn = http.client.HTTPSConnection(GOOGLE_HOST, timeout=10)
         try:
@@ -411,40 +417,76 @@ def google_translate(conn, text):
             body = r.read()
         except (http.client.HTTPException, OSError) as e:
             conn.close()
-            conn, error = None, e
+            conn, error = None, RuntimeError(f"連線失敗（{e}）")
             continue
-        if r.status == 200:
+        if r.status != 200:
+            hint = "，送太多次被暫時擋下" if r.status == 429 else ""
+            error = RuntimeError(f"Google 回應 HTTP {r.status}{hint}")
+            continue
+        try:
             pieces = json.loads(body)[0]
-            return "".join(p[0] for p in pieces if p[0]).strip(), conn
-        error = RuntimeError(f"Google 翻譯回應 HTTP {r.status}")
+            zh = "".join(p[0] for p in pieces if p[0]).strip()
+        except (ValueError, TypeError, IndexError):
+            error = RuntimeError("Google 回應的內容看不懂")
+            continue
+        if zh:
+            return zh, conn
+        error = RuntimeError("Google 回了空白的結果")
     raise error
 
 
 MODEL_ERROR_REPORTED = threading.Event()
-GOOGLE_ERROR_REPORTED = threading.Event()
+
+
+def short(text, limit=30):
+    """印失敗訊息時附上那句英文的開頭，方便對照是字幕上的哪一句"""
+    return text if len(text) <= limit else text[:limit] + "⋯"
+
+
+def try_google(conn, seq, text):
+    """回傳 (翻譯結果, 連線)；失敗時翻譯結果是空字串，並把原因印出來"""
+    try:
+        return google_translate(conn, text)
+    except Exception as e:
+        print(f"第 {seq} 句 Google 翻譯失敗：{e}（{short(text)}）")
+        return "", None
+
+
+def try_gemini(key, seq, text):
+    """回傳翻譯結果；失敗時回傳空字串，並把原因印出來"""
+    try:
+        return gemini_translate(key, text)
+    except HTTPError as e:
+        if e.code == 404 and not MODEL_ERROR_REPORTED.is_set():
+            MODEL_ERROR_REPORTED.set()
+            print(f"\n型號 {GEMINI_MODEL} 不可用。")
+            show_available_models(key)
+        print(f"第 {seq} 句 Gemini 翻譯失敗：HTTP {e.code}（{short(text)}）")
+    except (KeyError, IndexError, TypeError):
+        print(f"第 {seq} 句 Gemini 翻譯失敗：回應裡沒有譯文（{short(text)}）")
+    except Exception as e:
+        print(f"第 {seq} 句 Gemini 翻譯失敗：{e}（{short(text)}）")
+    return ""
 
 
 def translate_worker(translator, key):
+    """
+    translator 是 "gemini" 就只用 Gemini。
+    是 "google" 時先用 Google，失敗了而且有 Gemini 金鑰（key 不是 None），就改用 Gemini 補翻那一句。
+    """
     conn = None          # 只有 Google 翻譯會用到，每個執行緒各自一條
     while True:
         seq, text = trans_q.get()
-        try:
-            if translator == "gemini":
-                zh = gemini_translate(key, text)
-            else:
-                zh, conn = google_translate(conn, text)
-            ui_q.put(("zh", seq, zh))
-        except HTTPError as e:
-            if e.code == 404 and not MODEL_ERROR_REPORTED.is_set():
-                MODEL_ERROR_REPORTED.set()
-                print(f"\n型號 {GEMINI_MODEL} 不可用。")
-                show_available_models(key)
-            ui_q.put(("zh", seq, ""))
-        except Exception as e:
-            if translator == "google" and not GOOGLE_ERROR_REPORTED.is_set():
-                GOOGLE_ERROR_REPORTED.set()
-                print(f"\nGoogle 翻譯失敗（{e}）。一直失敗的話請改用 Gemini 翻譯。")
-            ui_q.put(("zh", seq, ""))
+        if translator == "gemini":
+            zh = try_gemini(key, seq, text)
+        else:
+            zh, conn = try_google(conn, seq, text)
+            if not zh and key:
+                ui_q.put(("zh", seq, "Google 沒翻到，改用 Gemini 補翻中⋯"))
+                zh = try_gemini(key, seq, text)
+                if zh:
+                    print(f"第 {seq} 句已改用 Gemini 補翻成功")
+        ui_q.put(("zh", seq, zh))
 
 
 # ══════════════════════════════════════════════════════
@@ -729,11 +771,13 @@ def main():
     if not low <= max_segment <= high:
         sys.exit(f"--max-seconds 只能在 {low:.0f} 到 {high:.0f} 之間")
 
-    key = None
+    key = read_key()
     if translator == "google":
-        print("翻譯：Google 翻譯")
+        if key:
+            print("翻譯：Google 翻譯（沒翻到的句子會改用 Gemini 補翻）")
+        else:
+            print("翻譯：Google 翻譯（沒有 Gemini 金鑰，沒翻到的句子不會補翻）")
     else:
-        key = read_key()
         if key:
             print("翻譯：Gemini 已啟用")
         else:
