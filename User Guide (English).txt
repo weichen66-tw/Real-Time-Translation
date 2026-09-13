@@ -1,0 +1,100 @@
+Game Live Subtitles - User Guide
+================================
+中文說明請看「使用說明.txt」
+
+What it does
+------------
+Turns what other people say in Discord or in a game into live subtitles that
+float over your screen, showing the original speech plus a translation.
+It can translate English → Chinese, or Chinese → English.
+
+
+Getting started
+---------------
+1. Extract the whole zip file (don't take the exe out on its own; the
+   _internal folder next to it must stay there)
+2. Double-click "遊戲即時字幕.exe" (the program's Chinese name, meaning
+   "Game Live Subtitles")
+3. If the window shows Chinese, pick "English" in the language menu at the
+   top right
+4. Follow "How to use" in the window, then press "Start"
+
+
+Translation direction
+---------------------
+Under "Translation", pick the language the other person speaks:
+- They speak English → "English → Chinese": English on top, Chinese below
+- They speak Chinese → "Chinese → English": Chinese on top, English below
+Picking the wrong one gives no text, or gibberish.
+
+
+Language
+--------
+Switch between "繁體中文" (Traditional Chinese) and "English" in the menu at
+the top right of the window. The log and the hints on the subtitles switch too.
+On first launch it follows your Windows language: Chinese Windows shows
+Chinese, any other language shows English.
+
+
+Translate only one app (e.g. only Discord)
+------------------------------------------
+Pick Discord.exe in "Only this app". In-game characters speaking English
+won't be translated; only real people talking in Discord become subtitles.
+
+Not in the list? Make that app play a sound once (e.g. ask someone to say
+something), then press "Refresh" next to it. Once an app is picked,
+"Audio source" is no longer used and is greyed out.
+
+
+First run
+---------
+- The first time you press "Start", it may take 1–2 minutes to respond.
+  Windows antivirus is scanning the files; it is not frozen. After that it
+  opens in about 3 seconds.
+- The speech recognition model downloads automatically ("Standard" is about
+  460 MB) and needs an internet connection. Wait until the status at the
+  bottom says "Running". It only downloads once.
+- Windows may show "Windows protected your PC":
+  click "More info" → "Run anyway".
+  (This appears because the program isn't signed with a paid digital
+  certificate. It is not a virus.)
+
+
+Graphics card
+-------------
+- With an NVIDIA graphics card, it uses the GPU automatically and is much faster.
+- Without one, it uses the CPU instead. It still works, but subtitles lag
+  1–2 seconds; set "Accuracy" to "Fast" or "Standard", not "Accurate".
+
+
+Translator
+----------
+- Google Translate is the default and needs no setup.
+- For more natural, conversational translations you can pick Gemini, but it
+  is slower and needs a free API key from https://aistudio.google.com/apikey
+
+
+Moving and resizing the subtitles
+---------------------------------
+- Drag the subtitle bar anywhere with the mouse.
+- Drag the "◢" grip at the bottom-right to change its width.
+- Hotkeys that also work in game:
+    Ctrl+Alt+Arrow keys → move the subtitles
+    Ctrl+Alt+L          → lock / unlock (locked = clicks pass through, so
+                          it won't block your game)
+- Position and width are remembered for next time.
+
+
+Troubleshooting
+---------------
+- Can't see the subtitles → set the game to "Borderless window";
+  exclusive fullscreen hides them.
+- Subtitles keep popping up or show strange words → raise "Volume threshold".
+- Nothing happens when people talk → in "Audio source", pick the speakers or
+  headphones that play the sound, or lower "Volume threshold".
+- No text or gibberish → check that "Translation" matches the language being
+  spoken.
+- Can't close the subtitles after turning on click-through → go back to the
+  launcher window and press "Stop".
+- The translation line keeps showing "—" → Google Translate may be
+  temporarily unreachable; try Gemini instead.

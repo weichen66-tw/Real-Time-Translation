@@ -31,6 +31,9 @@ ZIP_FILE = DIST / f"{APP_NAME}.zip"
 PERSONAL_FILES = {".env", "gemini_key.txt", "launcher_settings.json",
                   "overlay_pos.json", "transcript.txt"}
 
+# 給使用者看的說明（中文、英文），打包時複製到 exe 旁邊
+GUIDES = ("使用說明.txt", "User Guide (English).txt")
+
 
 def nvidia_binaries():
     """
@@ -79,7 +82,8 @@ def folder_size_mb(path):
 
 def main():
     run_pyinstaller()
-    (APP_DIR / "使用說明.txt").write_bytes((HERE / "使用說明.txt").read_bytes())
+    for guide in GUIDES:
+        (APP_DIR / guide).write_bytes((HERE / guide).read_bytes())
     print("\n壓縮中（檔案很大，要等一下）⋯")
     make_zip()
     print(f"\n完成！")

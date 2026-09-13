@@ -106,6 +106,9 @@ py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不�
 pip 裝的 NVIDIA 元件 PyInstaller 不會自動收，要在 `nvidia_binaries()` 手動加，這些元件就佔了約 2GB。
 程式執行時產生的檔案（`.env`、`overlay_pos.json`、`transcript.txt`、`launcher_settings.json`）
 在 exe 版會存在 exe 旁邊（程式裡用 `sys.frozen` 判斷），壓縮檔會自動排除這些個人檔案。
+給使用者看的說明有兩份：`使用說明.txt`（中文）和 `User Guide (English).txt`（英文），
+打包時由 `GUIDES` 複製到 exe 旁邊。**功能或畫面文字有變時，兩份說明都要一起更新**，
+英文版提到的按鈕名稱要跟 `i18n.py` 的英文一致。
 
 **多執行緒的分工（`overlay_subtitle.py`）。**
 （執行緒 = 讓程式同時做好幾件事的機制，可以想成同時有好幾個人在做不同工作。）
