@@ -42,6 +42,10 @@ NO_APP = "（不指定，錄整台電腦的聲音）"
 MAX_LOG_LINES = 500
 
 # 畫面上顯示的文字 → 傳給字幕程式的參數值
+DIRECTIONS = {
+    "英文 → 中文（對方講英文，字幕顯示中文翻譯）": "en-zh",
+    "中文 → 英文（對方講中文，字幕顯示英文翻譯）": "zh-en",
+}
 TRANSLATORS = {
     "Google 翻譯（快，不用金鑰）": "google",
     "Gemini（比較口語，但慢，需要金鑰）": "gemini",
@@ -51,7 +55,8 @@ MODELS = {
     "標準（small）": "small",
     "精準（large-v3-turbo，需要 NVIDIA 顯示卡）": "large-v3-turbo",
 }
-DEFAULTS = {"device": DEFAULT_DEVICE, "app": NO_APP, "translator": "google", "model": "small",
+DEFAULTS = {"device": DEFAULT_DEVICE, "app": NO_APP, "direction": "en-zh",
+            "translator": "google", "model": "small",
             "lines": 3, "min_rms": 200, "max_seconds": 8, "click_through": False}
 
 TIPS = ("① 遊戲請設成「無邊框視窗」（全螢幕獨佔會看不到字幕）\n"
@@ -167,7 +172,8 @@ def list_apps():
 def build_overlay_args(s):
     """把畫面上的設定轉成字幕程式的指令參數"""
     args = ["--overlay", "--model", s["model"], "--min-rms", str(s["min_rms"]),
-            "--lines", str(s["lines"]), "--translator", s["translator"],
+            "--lines", str(s["lines"]), "--direction", s["direction"],
+            "--translator", s["translator"],
             "--max-seconds", str(s["max_seconds"])]
     if s["app"] != NO_APP:
         args += ["--app", s["app"]]          # 指定程式時就不看聲音來源了
@@ -242,41 +248,45 @@ class Launcher:
         self.refresh_devices(select=s["device"])
         self.refresh_source_state()
 
+        self.direction_var = tk.StringVar(value=label_of(DIRECTIONS, s["direction"]))
+        self.add_combo(box, 4, "翻譯方向", self.direction_var, list(DIRECTIONS))
+        self.add_hint(box, 5, "對方講什麼語言就選哪個；選錯的話會聽不出字或變亂碼")
+
         self.translator_var = tk.StringVar(value=label_of(TRANSLATORS, s["translator"]))
-        combo = self.add_combo(box, 4, "翻譯方式", self.translator_var, list(TRANSLATORS))
+        combo = self.add_combo(box, 6, "翻譯方式", self.translator_var, list(TRANSLATORS))
         combo.bind("<<ComboboxSelected>>", lambda _: self.refresh_key_state())
 
-        ttk.Label(box, text="Gemini 金鑰").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="Gemini 金鑰").grid(row=7, column=0, sticky="w", pady=4)
         self.key_var = tk.StringVar()
         self.key_entry = ttk.Entry(box, textvariable=self.key_var, show="•")
-        self.key_entry.grid(row=5, column=1, sticky="ew", pady=4)
-        self.key_hint = self.add_hint(box, 6, "")
+        self.key_entry.grid(row=7, column=1, sticky="ew", pady=4)
+        self.key_hint = self.add_hint(box, 8, "")
         self.refresh_key_state()
 
         self.model_var = tk.StringVar(value=label_of(MODELS, s["model"]))
-        self.add_combo(box, 7, "辨識準確度", self.model_var, list(MODELS))
+        self.add_combo(box, 9, "辨識準確度", self.model_var, list(MODELS))
 
-        ttk.Label(box, text="字幕行數").grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="字幕行數").grid(row=10, column=0, sticky="w", pady=4)
         self.lines_var = tk.StringVar(value=str(s["lines"]))
         spin = ttk.Spinbox(box, from_=1, to=5, width=5, textvariable=self.lines_var,
                            state="readonly")
-        spin.grid(row=8, column=1, sticky="w", pady=4)
+        spin.grid(row=10, column=1, sticky="w", pady=4)
         self.inputs.append(spin)
 
-        ttk.Label(box, text="切段秒數").grid(row=9, column=0, sticky="w", pady=4)
+        ttk.Label(box, text="切段秒數").grid(row=11, column=0, sticky="w", pady=4)
         self.seconds_var = tk.StringVar(value=str(s["max_seconds"]))
         seconds = ttk.Spinbox(box, from_=2, to=30, width=5, state="readonly",
                               textvariable=self.seconds_var)
-        seconds.grid(row=9, column=1, sticky="w", pady=4)
+        seconds.grid(row=11, column=1, sticky="w", pady=4)
         self.inputs.append(seconds)
-        self.add_hint(box, 10, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
+        self.add_hint(box, 12, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
 
-        self.build_rms_row(box, 11, s["min_rms"])
+        self.build_rms_row(box, 13, s["min_rms"])
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
         check = ttk.Checkbutton(box, variable=self.click_var,
                                 text="一開始就鎖定字幕（滑鼠穿透，不會擋到遊戲操作；隨時可按 Ctrl+Alt+L 解鎖）")
-        check.grid(row=13, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        check.grid(row=15, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
     def build_rms_row(self, box, row, value):
@@ -386,6 +396,7 @@ class Launcher:
         return {
             "device": self.device_var.get() or DEFAULT_DEVICE,
             "app": self.app_var.get() or NO_APP,
+            "direction": DIRECTIONS[self.direction_var.get()],
             "translator": TRANSLATORS[self.translator_var.get()],
             "model": MODELS[self.model_var.get()],
             "lines": lines,

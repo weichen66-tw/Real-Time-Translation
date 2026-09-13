@@ -2,7 +2,7 @@
 Step 3: 遊戲即時字幕懸浮視窗
 
 畫面底部一條半透明長條，顯示最近幾句話（行數可用 --lines 調整）。
-英文先出現，中文翻譯隨後補上。
+原文先出現，翻譯隨後補上。預設聽英文翻中文，--direction zh-en 改成聽中文翻英文。
 
 字幕條可以用滑鼠拖到任何位置、拖右下角的握把調寬度；
 Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透），遊戲中也有效。
@@ -24,6 +24,7 @@ Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透
 
 用法：
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
+    py overlay_subtitle.py --direction zh-en  # 聽中文、翻成英文（預設 en-zh 聽英文翻中文）
     py overlay_subtitle.py --translator gemini  # 改用 Gemini 翻譯
     py overlay_subtitle.py --max-seconds 5    # 講不停時最多 5 秒就切一段（預設 8）
     py overlay_subtitle.py --click-through    # 一開始就鎖定（滑鼠穿透），之後可用 Ctrl+Alt+L 解鎖
@@ -280,7 +281,8 @@ def open_transcript():
         return None
 
 
-def stt_worker(model, min_rms, max_segment):
+def stt_worker(model, min_rms, max_segment, direction):
+    lang = DIRECTIONS[direction]
     buffer, speaking, silence_start, seq = [], False, None, 0
     preroll, preroll_n = deque(), 0
     out = open_transcript()
@@ -302,9 +304,10 @@ def stt_worker(model, min_rms, max_segment):
         buffer, speaking = [], False
         if len(audio) < TARGET_RATE * MIN_SEGMENT_SEC:
             return
-        segments, _ = model.transcribe(audio, language="en", beam_size=1,
+        segments, _ = model.transcribe(audio, language=lang["whisper"], beam_size=1,
                                        vad_filter=True,
-                                       condition_on_previous_text=False)
+                                       condition_on_previous_text=False,
+                                       initial_prompt=lang["hint"])
         text = " ".join(s.text.strip() for s in segments).strip()
         if not text:
             return
@@ -357,16 +360,36 @@ def read_key():
     return os.environ.get("GEMINI_API_KEY", "").strip() or None
 
 
-PROMPT = (
-    "把以下這句遊戲語音聊天的英文翻成繁體中文。"
-    "口語化、簡短，保留遊戲術語的語感。"
-    "只輸出翻譯，不要任何解釋或引號。\n\n"
-)
+# 翻譯方向：命令列用 --direction 選，啟動視窗的「翻譯方向」也是傳這兩個值
+#   whisper       語音辨識要聽哪種語言
+#   hint          給語音辨識的開頭提示。聽中文時常會吐出簡體字，給一句繁體讓它傾向輸出繁體
+#   google_sl/tl  Google 翻譯的來源語言／目標語言
+#   src_font      原文（上面那行）用的字型；dst_font 是翻譯（下面那行）用的字型
+DIRECTIONS = {
+    "en-zh": {
+        "label": "英文 → 中文",
+        "whisper": "en", "hint": None,
+        "google_sl": "en", "google_tl": "zh-TW",
+        "src_font": EN_FONT, "dst_font": ZH_FONT,
+        "prompt": ("把以下這句遊戲語音聊天的英文翻成繁體中文。"
+                   "口語化、簡短，保留遊戲術語的語感。"
+                   "只輸出翻譯，不要任何解釋或引號。\n\n"),
+    },
+    "zh-en": {
+        "label": "中文 → 英文",
+        "whisper": "zh", "hint": "以下是繁體中文的句子。",
+        "google_sl": "zh-TW", "google_tl": "en",
+        "src_font": ZH_FONT, "dst_font": EN_FONT,
+        "prompt": ("把以下這句遊戲語音聊天的中文翻成英文。"
+                   "口語化、簡短，保留遊戲術語的語感。"
+                   "只輸出英文翻譯，不要任何解釋或引號。\n\n"),
+    },
+}
 
 
-def gemini_translate(key, text):
+def gemini_translate(key, text, direction):
     body = json.dumps({
-        "contents": [{"parts": [{"text": PROMPT + text}]}],
+        "contents": [{"parts": [{"text": DIRECTIONS[direction]["prompt"] + text}]}],
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 200},
     }).encode()
     url = f"{GEMINI_URL}/{GEMINI_MODEL}:generateContent?key={key}"
@@ -391,7 +414,7 @@ def show_available_models(key):
         print("列出型號失敗：", e)
 
 
-def google_translate(conn, text):
+def google_translate(conn, text, direction):
     """
     走 Google 翻譯網頁版背後的免費管道：不用金鑰，通常 0.1 秒內回來。
     這不是 Google 正式對外的服務，哪天被擋掉就改用 --translator gemini。
@@ -403,7 +426,8 @@ def google_translate(conn, text):
     不馬上重試是因為被擋或網路卡住時，馬上再送通常也是失敗。
     回傳 (翻譯結果, 連線)；試完都失敗就丟出錯誤，錯誤訊息是最後一次失敗的原因。
     """
-    query = urlencode({"client": "gtx", "sl": "en", "tl": "zh-TW",
+    lang = DIRECTIONS[direction]
+    query = urlencode({"client": "gtx", "sl": lang["google_sl"], "tl": lang["google_tl"],
                        "dt": "t", "q": text})
     error = None
     for attempt in range(len(GOOGLE_RETRY_WAITS) + 1):
@@ -425,12 +449,12 @@ def google_translate(conn, text):
             continue
         try:
             pieces = json.loads(body)[0]
-            zh = "".join(p[0] for p in pieces if p[0]).strip()
+            result = "".join(p[0] for p in pieces if p[0]).strip()
         except (ValueError, TypeError, IndexError):
             error = RuntimeError("Google 回應的內容看不懂")
             continue
-        if zh:
-            return zh, conn
+        if result:
+            return result, conn
         error = RuntimeError("Google 回了空白的結果")
     raise error
 
@@ -439,23 +463,23 @@ MODEL_ERROR_REPORTED = threading.Event()
 
 
 def short(text, limit=30):
-    """印失敗訊息時附上那句英文的開頭，方便對照是字幕上的哪一句"""
+    """印失敗訊息時附上那句原文的開頭，方便對照是字幕上的哪一句"""
     return text if len(text) <= limit else text[:limit] + "⋯"
 
 
-def try_google(conn, seq, text):
+def try_google(conn, seq, text, direction):
     """回傳 (翻譯結果, 連線)；失敗時翻譯結果是空字串，並把原因印出來"""
     try:
-        return google_translate(conn, text)
+        return google_translate(conn, text, direction)
     except Exception as e:
         print(f"第 {seq} 句 Google 翻譯失敗：{e}（{short(text)}）")
         return "", None
 
 
-def try_gemini(key, seq, text):
+def try_gemini(key, seq, text, direction):
     """回傳翻譯結果；失敗時回傳空字串，並把原因印出來"""
     try:
-        return gemini_translate(key, text)
+        return gemini_translate(key, text, direction)
     except HTTPError as e:
         if e.code == 404 and not MODEL_ERROR_REPORTED.is_set():
             MODEL_ERROR_REPORTED.set()
@@ -469,7 +493,7 @@ def try_gemini(key, seq, text):
     return ""
 
 
-def translate_worker(translator, key):
+def translate_worker(translator, key, direction):
     """
     translator 是 "gemini" 就只用 Gemini。
     是 "google" 時先用 Google，失敗了而且有 Gemini 金鑰（key 不是 None），就改用 Gemini 補翻那一句。
@@ -478,15 +502,15 @@ def translate_worker(translator, key):
     while True:
         seq, text = trans_q.get()
         if translator == "gemini":
-            zh = try_gemini(key, seq, text)
+            result = try_gemini(key, seq, text, direction)
         else:
-            zh, conn = try_google(conn, seq, text)
-            if not zh and key:
-                ui_q.put(("zh", seq, "Google 沒翻到，改用 Gemini 補翻中⋯"))
-                zh = try_gemini(key, seq, text)
-                if zh:
+            result, conn = try_google(conn, seq, text, direction)
+            if not result and key:
+                ui_q.put(("translated", seq, "Google 沒翻到，改用 Gemini 補翻中⋯"))
+                result = try_gemini(key, seq, text, direction)
+                if result:
                     print(f"第 {seq} 句已改用 Gemini 補翻成功")
-        ui_q.put(("zh", seq, zh))
+        ui_q.put(("translated", seq, result))
 
 
 # ══════════════════════════════════════════════════════
@@ -525,9 +549,9 @@ def hotkey_worker(cmd_q):
 
 
 class Overlay:
-    def __init__(self, n_lines, click_through):
+    def __init__(self, n_lines, click_through, direction):
         self.n = n_lines
-        self.entries = []          # [{seq, en, zh}]
+        self.entries = []          # [{seq, src（原文）, dst（翻譯）}]
         self.locked = click_through
         self.cmd_q = queue.Queue()  # 快速鍵按下後要做的事
 
@@ -547,17 +571,19 @@ class Overlay:
         # 底邊固定，內容變多時視窗往上長，字幕位置才不會亂跳
         self.bottom_y = self.y + self.h
 
+        # 上面一行永遠是原文（白字）、下面一行是翻譯（藍字），字型跟著那一行的語言走
+        lang = DIRECTIONS[direction]
         self.rows = []
         for _ in range(n_lines):
             frame = tk.Frame(self.root, bg=BG_COLOR)
             frame.pack(fill="x", padx=14, pady=(5, 5))
-            en = tk.Label(frame, text="", font=EN_FONT, fg=EN_COLOR,
-                          bg=BG_COLOR, anchor="w", justify="left")
-            zh = tk.Label(frame, text="", font=ZH_FONT, fg=ZH_COLOR,
-                          bg=BG_COLOR, anchor="w", justify="left")
-            en.pack(fill="x")
-            zh.pack(fill="x")
-            self.rows.append((en, zh))
+            src = tk.Label(frame, text="", font=lang["src_font"], fg=EN_COLOR,
+                           bg=BG_COLOR, anchor="w", justify="left")
+            dst = tk.Label(frame, text="", font=lang["dst_font"], fg=ZH_COLOR,
+                           bg=BG_COLOR, anchor="w", justify="left")
+            src.pack(fill="x")
+            dst.pack(fill="x")
+            self.rows.append((src, dst))
 
         # 右下角的握把：拖它可以調字幕條的寬度
         self.grip = tk.Label(self.root, text="◢", font=("Segoe UI", 9),
@@ -704,12 +730,12 @@ class Overlay:
         while not ui_q.empty():
             kind, seq, text = ui_q.get()
             if kind == "new":
-                self.entries.append({"seq": seq, "en": text, "zh": "翻譯中⋯"})
+                self.entries.append({"seq": seq, "src": text, "dst": "翻譯中⋯"})
                 self.entries = self.entries[-self.n:]
             else:
                 for e in self.entries:
                     if e["seq"] == seq:
-                        e["zh"] = text or "—"
+                        e["dst"] = text or "—"
             changed = True
         if changed:
             self.render()
@@ -719,13 +745,13 @@ class Overlay:
         pad = self.n - len(self.entries)
         cells = [None] * pad + self.entries
         wrap = self.w - 30
-        for (en_lbl, zh_lbl), item in zip(self.rows, cells):
+        for (src_lbl, dst_lbl), item in zip(self.rows, cells):
             if item is None:
-                en_lbl.config(text="")
-                zh_lbl.config(text="")
+                src_lbl.config(text="")
+                dst_lbl.config(text="")
             else:
-                en_lbl.config(text=item["en"], wraplength=wrap)
-                zh_lbl.config(text=item["zh"], wraplength=wrap)
+                src_lbl.config(text=item["src"], wraplength=wrap)
+                dst_lbl.config(text=item["dst"], wraplength=wrap)
         self.fit_height()
 
     def fit_height(self):
@@ -759,6 +785,7 @@ def main():
     device_filter = opt("--device", None)
     app_name = opt("--app", None)
     translator = opt("--translator", "google")
+    direction = opt("--direction", "en-zh")
     max_segment = float(opt("--max-seconds", MAX_SEGMENT_SEC))
 
     if "--list-devices" in args:
@@ -767,6 +794,9 @@ def main():
 
     if translator not in ("google", "gemini"):
         sys.exit("--translator 只能是 google 或 gemini")
+    if direction not in DIRECTIONS:
+        sys.exit("--direction 只能是 " + " 或 ".join(DIRECTIONS))
+    print(f"翻譯方向：{DIRECTIONS[direction]['label']}")
     low, high = MAX_SEGMENT_RANGE
     if not low <= max_segment <= high:
         sys.exit(f"--max-seconds 只能在 {low:.0f} 到 {high:.0f} 之間")
@@ -781,7 +811,7 @@ def main():
         if key:
             print("翻譯：Gemini 已啟用")
         else:
-            print("翻譯：未設定 Gemini key，只顯示英文")
+            print("翻譯：未設定 Gemini key，只顯示原文")
             print(f"      （要翻譯的話，在 {ENV_FILE.name} 寫入 GEMINI_API_KEY=你的key，"
                   f"或改用 Google 翻譯）")
             translator = None
@@ -804,12 +834,12 @@ def main():
                                    args=(dev, rate, channels), daemon=True)
     capture.start()
     threading.Thread(target=stt_worker,
-                     args=(model, min_rms, max_segment), daemon=True).start()
+                     args=(model, min_rms, max_segment, direction), daemon=True).start()
     print(f"切段：安靜 {SILENCE_TO_FLUSH:.1f} 秒算講完，講不停最多 {max_segment:.0f} 秒切一段")
     if translator:
         for _ in range(2):
             threading.Thread(target=translate_worker,
-                             args=(translator, key), daemon=True).start()
+                             args=(translator, key, direction), daemon=True).start()
 
     print("\n字幕視窗已開啟。")
     if click_through:
@@ -820,7 +850,7 @@ def main():
     print("位置和寬度都會自動記住")
     print("⚠️ 遊戲請設成「無邊框視窗」，全螢幕獨佔看不到字幕\n")
 
-    Overlay(n_lines, click_through).run()
+    Overlay(n_lines, click_through, direction).run()
 
 
 if __name__ == "__main__":

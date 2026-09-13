@@ -15,8 +15,9 @@
 ## 這個專案是什麼
 
 這是一套只能在 Windows 上跑的三階段流程：先把 Discord 或遊戲裡別人講話的聲音，從電腦的喇叭輸出端錄下來，
-交給 faster-whisper（一套語音轉文字的程式）聽成英文字，再送去翻成中文（預設 Google 翻譯，可切換成 Gemini），
+交給 faster-whisper（一套語音轉文字的程式）聽成文字，再送去翻譯（預設 Google 翻譯，可切換成 Gemini），
 最後用一條浮在遊戲畫面上的半透明字幕條顯示出來。
+翻譯方向有兩種：英文 → 中文（預設）、中文 → 英文，由使用者自己選，不會自動判斷語言。
 
 一般使用者的入口是 `launcher.py`（啟動視窗）：用點的選設定、按「開始」，不用記指令參數。
 要給沒裝 Python 的朋友用時，用 `build_exe.py` 打包成 exe。
@@ -51,6 +52,7 @@ py live_transcribe.py --list-devices
 py overlay_subtitle.py
 py overlay_subtitle.py --click-through --lines 2 --model base --min-rms 400
 py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可以避開遊戲音效
+py overlay_subtitle.py --direction zh-en   # 聽中文、字幕顯示英文翻譯（預設 en-zh）
 py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
 py overlay_subtitle.py --max-seconds 5     # 講不停時最多幾秒切一段（預設 8）
 py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不錄遊戲音效
@@ -103,8 +105,9 @@ capture_worker ──audio_q──> stt_worker ──trans_q──> translate_wo
                              Overlay.poll() 在畫面主執行緒上，每 0.1 秒檢查一次
 ```
 
-`seq` 是一個從 1 開始不斷往上加的編號，每聽完一句話就給它一個號碼。英文字會先送到畫面上
-（`("new", seq, en)`），中文翻譯晚一點才到（`("zh", seq, zh)`），靠這個編號對回原本那一句。
+`seq` 是一個從 1 開始不斷往上加的編號，每聽完一句話就給它一個號碼。原文會先送到畫面上
+（`("new", seq, 原文)`），翻譯晚一點才到（`("translated", seq, 翻譯)`），靠這個編號對回原本那一句。
+字幕視窗裡每一句存成 `{seq, src（原文）, dst（翻譯）}`。
 正因為有編號，兩個翻譯工作才可以同時跑而不會讓字幕順序亂掉。
 `live_transcribe.py` 沒這麼複雜，只有一個錄音執行緒加上主程式處理。
 
@@ -138,6 +141,15 @@ Windows 要程式真的播過聲音才會有這筆資料，所以清單旁邊要
 pip 裝的 NVIDIA 元件（cuBLAS、cuDNN）放在 `site-packages/nvidia/*/bin`，Windows 預設找不到，
 所以 `load_model` 試顯示卡之前會先呼叫 `add_nvidia_dll_dirs()` 把那些資料夾加進搜尋路徑。
 少了這步會出現 `cublas64_12.dll is not found`，然後默默退回 CPU（實測慢 14 倍）。
+
+**翻譯方向（`--direction`，`DIRECTIONS`）。** `overlay_subtitle.py` 最主要的設定表，
+一個方向（`en-zh` 或 `zh-en`）集中記錄：語音辨識要聽的語言、Google 翻譯的來源／目標語言、
+Gemini 的提示文字、字幕上下兩行各用什麼字型。要改方向相關的行為，改這張表就好。
+- 字幕上面一行永遠是原文（白字）、下面一行是翻譯（藍字）；字型跟著語言走（英文用 Consolas、中文用微軟正黑體）。
+- 聽中文時會給語音辨識一句繁體中文當開頭提示（`hint`），讓它傾向輸出繁體字。
+  這只是「傾向」不是保證，沒有另外裝繁簡轉換套件。
+- `live_transcribe.py` 是除錯用的簡化版，**只聽英文**，沒有加翻譯方向。
+- 啟動視窗的「翻譯方向」下拉選單在 `launcher.py` 的 `DIRECTIONS`，把畫面文字對應成 `en-zh`／`zh-en`。
 
 **翻譯怎麼做的。** 兩種都沒有用官方套件，只用 Python 內建的網路功能：
 - **Google 翻譯（預設，`google_translate`）**：走 Google 翻譯網頁版背後的免費管道
@@ -190,9 +202,9 @@ Windows 規定註冊和收訊息要在同一個執行緒，所以兩件事都在
 - **金鑰放在 `.env`**（格式是一行 `GEMINI_API_KEY=金鑰`），`.env` 已列在 `.gitignore`，不會被上傳。
   `overlay_subtitle.py` 的 `read_key()` 會先讀 `.env`，找不到再讀 `GEMINI_API_KEY` 這個系統環境變數
   （存在電腦裡、不會跟著程式碼一起上傳的設定值）。請不要再往專案裡放任何密碼或金鑰。
-- `transcript.txt`（每次執行都會往後接的逐字稿）和 `overlay_pos.json`（記住字幕視窗位置）
-  這兩個檔案是程式跑出來的，但也被上傳到 git 了。所以只要手動跑過程式，
-  git 就會顯示這兩個檔案「有變動」，這是正常的。
+- `transcript.txt`（每次執行都會往後接的逐字稿，裡面是實際聽到的對話，屬於個人資料）和
+  `overlay_pos.json`（記住字幕視窗位置，每台電腦都不一樣）是程式跑出來的檔案，**不會上傳 git**。
 - `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）列了金鑰（`.env`）、
-  `launcher_settings.json`，以及打包產生的 `build/`、`dist/`、`*.spec`、`__pycache__/`。
+  `launcher_settings.json`、`transcript.txt`、`overlay_pos.json`，
+  以及打包產生的 `build/`、`dist/`、`*.spec`、`__pycache__/`。
 - `dist/遊戲即時字幕/` 每次打包都會被整個清掉重做，不要把自己的東西放在裡面。
