@@ -25,6 +25,7 @@ Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透
 用法：
     py overlay_subtitle.py                    # 一般模式，可以拖曳視窗
     py overlay_subtitle.py --direction zh-en  # 聽中文、翻成英文（預設 en-zh 聽英文翻中文）
+    py overlay_subtitle.py --ui-lang en       # 印出來的訊息改用英文（預設照 Windows 的語言）
     py overlay_subtitle.py --translator gemini  # 改用 Gemini 翻譯
     py overlay_subtitle.py --max-seconds 5    # 講不停時最多 5 秒就切一段（預設 8）
     py overlay_subtitle.py --click-through    # 一開始就鎖定（滑鼠穿透），之後可用 Ctrl+Alt+L 解鎖
@@ -65,6 +66,8 @@ import pyaudiowpatch as pyaudio
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
 
+from i18n import set_lang, system_lang, t
+
 # ── 音訊設定 ──────────────────────────────────────────
 CHUNK = 1024
 TARGET_RATE = 16000
@@ -87,7 +90,6 @@ SIDE_MARGIN = 120
 BOTTOM_MARGIN = 90
 MIN_WIDTH = 320               # 字幕條最窄能拉到多少
 MOVE_STEP = 20                # 快速鍵一次移動幾點
-HOTKEY_HELP = "快速鍵：Ctrl+Alt+方向鍵 移動字幕、Ctrl+Alt+L 鎖定／解鎖（遊戲中也有效）"
 
 # ── Gemini 翻譯設定 ───────────────────────────────────
 GEMINI_MODEL = "gemini-flash-lite-latest"   # 若失效，程式會自動列出可用型號
@@ -114,10 +116,10 @@ ui_q: "queue.Queue[tuple]" = queue.Queue()
 def list_loopback_devices():
     """列出所有可抓的 loopback 裝置"""
     with pyaudio.PyAudio() as p:
-        print("\n=== 可用的 loopback 裝置 ===")
+        print(t("ov_devices_title"))
         for dev in p.get_loopback_device_info_generator():
             print(f"  {dev['name']}")
-        print("\n用 --device 加上名稱的一部分即可指定，例如：--device CABLE\n")
+        print(t("ov_devices_hint"))
 
 
 def find_loopback(p, name_filter=None):
@@ -129,8 +131,7 @@ def find_loopback(p, name_filter=None):
         for dev in p.get_loopback_device_info_generator():
             if name_filter.lower() in dev["name"].lower():
                 return dev
-        sys.exit(f"找不到名稱包含「{name_filter}」的 loopback 裝置。\n"
-                 f"用 --list-devices 看看有哪些可選。")
+        sys.exit(t("ov_no_device_named", name=name_filter))
 
     wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)
     speakers = p.get_device_info_by_index(wasapi["defaultOutputDevice"])
@@ -139,7 +140,7 @@ def find_loopback(p, name_filter=None):
     for dev in p.get_loopback_device_info_generator():
         if speakers["name"] in dev["name"]:
             return dev
-    sys.exit("找不到 loopback 裝置，請先確認 capture_test.py 跑得起來")
+    sys.exit(t("ov_no_loopback"))
 
 
 def to_mono_16k(raw, rate, channels):
@@ -172,7 +173,7 @@ def find_app_pid(name):
     procs = {p.pid: p.info for p in psutil.process_iter(["name", "ppid", "create_time"])
              if (p.info["name"] or "").lower() == wanted}
     if not procs:
-        sys.exit(f"找不到正在執行的「{name}」。請先把它打開，再重新開始字幕。")
+        sys.exit(t("ov_app_not_running", name=name))
     # 父程序也同名的話代表它是子程序，只留最上層、而且開最久的那一個
     roots = [item for item in procs.items() if item[1]["ppid"] not in procs] or list(procs.items())
     return min(roots, key=lambda item: item[1]["create_time"] or 0)[0]
@@ -190,8 +191,7 @@ def capture_app_worker(pid, app_name):
         cap = ProcessAudioCapture(pid=pid)
         cap.start()
     except Exception as e:
-        print(f"無法錄「{app_name}」的聲音（{type(e).__name__}：{e}）。"
-              f"請確認它還開著，或把「只翻譯這個程式」改回不指定。")
+        print(t("ov_app_capture_failed", name=app_name, error=f"{type(e).__name__}: {e}"))
         return
     try:
         next_check = time.time() + APP_ALIVE_CHECK_SEC
@@ -205,8 +205,7 @@ def capture_app_worker(pid, app_name):
             if time.time() >= next_check:
                 next_check = time.time() + APP_ALIVE_CHECK_SEC
                 if not psutil.pid_exists(pid):
-                    print(f"「{app_name}」已經關閉，不會再有字幕了。"
-                          f"重新打開它之後，請按「停止」再按「開始」。")
+                    print(t("ov_app_closed", name=app_name))
                     return
     finally:
         cap.stop()
@@ -255,14 +254,14 @@ def load_model(name, force_cpu=False):
         try:
             m = WhisperModel(name, device="cuda", compute_type="float16")
             warmup(m)
-            print(f"模型：{name} (GPU)")
+            print(f"{t('ov_model_prefix')}{name} (GPU)")
             return m
         except Exception as e:
-            print(f"GPU 不可用，改用 CPU（{type(e).__name__}）")
+            print(t("ov_gpu_unavailable", error=type(e).__name__))
 
     m = WhisperModel(name, device="cpu", compute_type="int8")
     warmup(m)
-    print(f"模型：{name} (CPU)")
+    print(f"{t('ov_model_prefix')}{name} (CPU)")
     return m
 
 
@@ -277,7 +276,7 @@ def open_transcript():
         out.flush()
         return out
     except OSError as e:
-        print(f"逐字稿存不了（{e}）。字幕照常顯示，只是不會留下紀錄。")
+        print(t("ov_transcript_failed", error=e))
         return None
 
 
@@ -367,7 +366,7 @@ def read_key():
 #   src_font      原文（上面那行）用的字型；dst_font 是翻譯（下面那行）用的字型
 DIRECTIONS = {
     "en-zh": {
-        "label": "英文 → 中文",
+        "label_key": "ov_dir_en_zh",
         "whisper": "en", "hint": None,
         "google_sl": "en", "google_tl": "zh-TW",
         "src_font": EN_FONT, "dst_font": ZH_FONT,
@@ -376,7 +375,7 @@ DIRECTIONS = {
                    "只輸出翻譯，不要任何解釋或引號。\n\n"),
     },
     "zh-en": {
-        "label": "中文 → 英文",
+        "label_key": "ov_dir_zh_en",
         "whisper": "zh", "hint": "以下是繁體中文的句子。",
         "google_sl": "zh-TW", "google_tl": "en",
         "src_font": ZH_FONT, "dst_font": EN_FONT,
@@ -405,13 +404,13 @@ def show_available_models(key):
     try:
         with urlrequest.urlopen(f"{GEMINI_URL}?key={key}", timeout=15) as r:
             data = json.load(r)
-        print("\n可用的型號（請修改檔案上方的 GEMINI_MODEL）：")
+        print(t("ov_models_title"))
         for m in data.get("models", []):
             if "generateContent" in m.get("supportedGenerationMethods", []):
                 print("   ", m["name"].replace("models/", ""))
         print()
     except Exception as e:
-        print("列出型號失敗：", e)
+        print(t("ov_models_failed", error=e))
 
 
 def google_translate(conn, text, direction):
@@ -441,21 +440,21 @@ def google_translate(conn, text, direction):
             body = r.read()
         except (http.client.HTTPException, OSError) as e:
             conn.close()
-            conn, error = None, RuntimeError(f"連線失敗（{e}）")
+            conn, error = None, RuntimeError(t("ov_google_conn", error=e))
             continue
         if r.status != 200:
-            hint = "，送太多次被暫時擋下" if r.status == 429 else ""
-            error = RuntimeError(f"Google 回應 HTTP {r.status}{hint}")
+            hint = t("ov_google_429") if r.status == 429 else ""
+            error = RuntimeError(t("ov_google_http", status=r.status) + hint)
             continue
         try:
             pieces = json.loads(body)[0]
             result = "".join(p[0] for p in pieces if p[0]).strip()
         except (ValueError, TypeError, IndexError):
-            error = RuntimeError("Google 回應的內容看不懂")
+            error = RuntimeError(t("ov_google_bad"))
             continue
         if result:
             return result, conn
-        error = RuntimeError("Google 回了空白的結果")
+        error = RuntimeError(t("ov_google_empty"))
     raise error
 
 
@@ -472,7 +471,7 @@ def try_google(conn, seq, text, direction):
     try:
         return google_translate(conn, text, direction)
     except Exception as e:
-        print(f"第 {seq} 句 Google 翻譯失敗：{e}（{short(text)}）")
+        print(t("ov_google_failed", seq=seq, error=e, text=short(text)))
         return "", None
 
 
@@ -483,13 +482,13 @@ def try_gemini(key, seq, text, direction):
     except HTTPError as e:
         if e.code == 404 and not MODEL_ERROR_REPORTED.is_set():
             MODEL_ERROR_REPORTED.set()
-            print(f"\n型號 {GEMINI_MODEL} 不可用。")
+            print(t("ov_gemini_model_gone", model=GEMINI_MODEL))
             show_available_models(key)
-        print(f"第 {seq} 句 Gemini 翻譯失敗：HTTP {e.code}（{short(text)}）")
+        print(t("ov_gemini_failed", seq=seq, error=f"HTTP {e.code}", text=short(text)))
     except (KeyError, IndexError, TypeError):
-        print(f"第 {seq} 句 Gemini 翻譯失敗：回應裡沒有譯文（{short(text)}）")
+        print(t("ov_gemini_failed", seq=seq, error=t("ov_gemini_no_text"), text=short(text)))
     except Exception as e:
-        print(f"第 {seq} 句 Gemini 翻譯失敗：{e}（{short(text)}）")
+        print(t("ov_gemini_failed", seq=seq, error=e, text=short(text)))
     return ""
 
 
@@ -506,10 +505,10 @@ def translate_worker(translator, key, direction):
         else:
             result, conn = try_google(conn, seq, text, direction)
             if not result and key:
-                ui_q.put(("translated", seq, "Google 沒翻到，改用 Gemini 補翻中⋯"))
+                ui_q.put(("translated", seq, t("ov_gemini_fallback")))
                 result = try_gemini(key, seq, text, direction)
                 if result:
-                    print(f"第 {seq} 句已改用 Gemini 補翻成功")
+                    print(t("ov_gemini_fallback_ok", seq=seq))
         ui_q.put(("translated", seq, result))
 
 
@@ -539,7 +538,7 @@ def hotkey_worker(cmd_q):
         if user32.RegisterHotKey(None, hotkey_id, mods, vk):
             actions[hotkey_id] = action
     if len(actions) < len(keys):
-        print("部分快速鍵被其他程式佔用了，只有部分能用")
+        print(t("ov_hotkeys_taken"))
     if not actions:
         return
     msg = wintypes.MSG()
@@ -612,7 +611,7 @@ class Overlay:
         if not self.on_any_monitor(x + w // 2, y + self.h // 2):
             # 上次拖到的外接螢幕現在沒接，照舊開會跑到畫面外看不到；
             # 位置檔不動，下次接回那台螢幕時字幕就會回到原處
-            print("上次的字幕位置不在目前的螢幕上（外接螢幕沒接？），先顯示在預設位置")
+            print(t("ov_pos_offscreen"))
             return w, default_x, default_y
         return w, x, y
 
@@ -710,8 +709,7 @@ class Overlay:
         else:
             self.grip.place(relx=1.0, rely=1.0, anchor="se")
         if not quiet:
-            print("字幕已鎖定：滑鼠可以穿透，改用快速鍵移動" if locked
-                  else "字幕已解鎖：可以用滑鼠拖曳，右下角握把可以調寬度")
+            print(t("ov_locked") if locked else t("ov_unlocked"))
 
     # ── 快速鍵 ──
     def handle_hotkeys(self):
@@ -730,7 +728,7 @@ class Overlay:
         while not ui_q.empty():
             kind, seq, text = ui_q.get()
             if kind == "new":
-                self.entries.append({"seq": seq, "src": text, "dst": "翻譯中⋯"})
+                self.entries.append({"seq": seq, "src": text, "dst": t("ov_translating")})
                 self.entries = self.entries[-self.n:]
             else:
                 for e in self.entries:
@@ -787,41 +785,39 @@ def main():
     translator = opt("--translator", "google")
     direction = opt("--direction", "en-zh")
     max_segment = float(opt("--max-seconds", MAX_SEGMENT_SEC))
+    # 印出來的訊息用哪種語言：啟動視窗會傳過來，自己單獨跑時照 Windows 的語言
+    set_lang(opt("--ui-lang", system_lang()))
 
     if "--list-devices" in args:
         list_loopback_devices()
         return
 
     if translator not in ("google", "gemini"):
-        sys.exit("--translator 只能是 google 或 gemini")
+        sys.exit(t("ov_bad_translator"))
     if direction not in DIRECTIONS:
-        sys.exit("--direction 只能是 " + " 或 ".join(DIRECTIONS))
-    print(f"翻譯方向：{DIRECTIONS[direction]['label']}")
+        sys.exit(t("ov_bad_direction", options=" / ".join(DIRECTIONS)))
+    print(t("ov_direction", label=t(DIRECTIONS[direction]["label_key"])))
     low, high = MAX_SEGMENT_RANGE
     if not low <= max_segment <= high:
-        sys.exit(f"--max-seconds 只能在 {low:.0f} 到 {high:.0f} 之間")
+        sys.exit(t("ov_bad_seconds", low=low, high=high))
 
     key = read_key()
     if translator == "google":
-        if key:
-            print("翻譯：Google 翻譯（沒翻到的句子會改用 Gemini 補翻）")
-        else:
-            print("翻譯：Google 翻譯（沒有 Gemini 金鑰，沒翻到的句子不會補翻）")
+        print(t("ov_tr_google_fallback") if key else t("ov_tr_google_only"))
     else:
         if key:
-            print("翻譯：Gemini 已啟用")
+            print(t("ov_tr_gemini"))
         else:
-            print("翻譯：未設定 Gemini key，只顯示原文")
-            print(f"      （要翻譯的話，在 {ENV_FILE.name} 寫入 GEMINI_API_KEY=你的key，"
-                  f"或改用 Google 翻譯）")
+            print(t("ov_tr_no_key"))
+            print(t("ov_tr_no_key_hint", file=ENV_FILE.name))
             translator = None
 
-    print("載入模型中，第一次執行需下載，請稍候⋯")
+    print(t("ov_loading"))
     model = load_model(model_name, "--cpu" in args)
 
     if app_name:
         pid = find_app_pid(app_name)
-        print(f"聲音來源：只錄「{app_name}」這個程式（含子程序，編號 {pid}）")
+        print(t("ov_source_app", name=app_name, pid=pid))
         capture = threading.Thread(target=capture_app_worker,
                                    args=(pid, app_name), daemon=True)
     else:
@@ -829,26 +825,23 @@ def main():
             dev = find_loopback(p, device_filter)
             rate = int(dev["defaultSampleRate"])
             channels = dev["maxInputChannels"]
-        print(f"裝置：{dev['name']}")
+        print(t("ov_device", name=dev["name"]))
         capture = threading.Thread(target=capture_worker,
                                    args=(dev, rate, channels), daemon=True)
     capture.start()
     threading.Thread(target=stt_worker,
                      args=(model, min_rms, max_segment, direction), daemon=True).start()
-    print(f"切段：安靜 {SILENCE_TO_FLUSH:.1f} 秒算講完，講不停最多 {max_segment:.0f} 秒切一段")
+    print(t("ov_segment", silence=SILENCE_TO_FLUSH, max=max_segment))
     if translator:
         for _ in range(2):
             threading.Thread(target=translate_worker,
                              args=(translator, key, direction), daemon=True).start()
 
-    print("\n字幕視窗已開啟。")
-    if click_through:
-        print("目前是鎖定狀態：滑鼠會穿透字幕，用快速鍵移動")
-    else:
-        print("可以直接用滑鼠拖曳字幕，右下角的握把可以調寬度。按 Esc 關閉。")
-    print(HOTKEY_HELP)
-    print("位置和寬度都會自動記住")
-    print("⚠️ 遊戲請設成「無邊框視窗」，全螢幕獨佔看不到字幕\n")
+    print(t("ov_window_open"))
+    print(t("ov_start_locked") if click_through else t("ov_start_unlocked"))
+    print(t("ov_hotkey_help"))
+    print(t("ov_pos_remembered"))
+    print(t("ov_borderless"))
 
     Overlay(n_lines, click_through, direction).run()
 

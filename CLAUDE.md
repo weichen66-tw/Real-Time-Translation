@@ -22,7 +22,9 @@
 一般使用者的入口是 `launcher.py`（啟動視窗）：用點的選設定、按「開始」，不用記指令參數。
 要給沒裝 Python 的朋友用時，用 `build_exe.py` 打包成 exe。
 這個專案沒有自動測試、也沒有記錄套件清單的檔案。
-程式裡的註解和所有跑出來給人看的訊息都是繁體中文，之後修改也請維持這個習慣。
+程式裡的註解一律用繁體中文。啟動視窗和字幕程式**給人看的文字有中文、英文兩種**（讓外國朋友也能用），
+全部集中在 `i18n.py`，新增或修改訊息時兩種語言都要寫（見下方「介面語言」）。
+`capture_test.py`、`live_transcribe.py` 是自己除錯用的，訊息只有中文。
 
 ## 指令
 
@@ -53,6 +55,7 @@ py overlay_subtitle.py
 py overlay_subtitle.py --click-through --lines 2 --model base --min-rms 400
 py overlay_subtitle.py --device CABLE      # 只錄 VB-Cable 這個裝置，可以避開遊戲音效
 py overlay_subtitle.py --direction zh-en   # 聽中文、字幕顯示英文翻譯（預設 en-zh）
+py overlay_subtitle.py --ui-lang en        # 印出來的訊息用英文（預設照 Windows 的語言）
 py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
 py overlay_subtitle.py --max-seconds 5     # 講不停時最多幾秒切一段（預設 8）
 py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不錄遊戲音效
@@ -81,10 +84,23 @@ py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不�
 **啟動視窗（`launcher.py`）。** 它本身不做錄音或辨識，按「開始」時是另外開一個程序
 （程序 = 一個獨立在跑的程式）去跑 `overlay_subtitle.main()`，把畫面上的設定轉成
 `--model`、`--translator` 這些參數傳過去，再把對方印出來的訊息一行行接回來顯示在「執行紀錄」區，
-也靠這些訊息（例如「字幕視窗已開啟」）更新狀態列。所以**改 `overlay_subtitle.py` 印出來的文字時，
-要一起檢查 `launcher.py` 的 `update_status`**。按「停止」就直接把那個程序關掉。
+也靠這些訊息（例如「字幕視窗已開啟」）更新狀態列。`update_status` 是拿 `i18n.py` 裡
+`ov_loading`、`ov_model_prefix`、`ov_window_open` 這三句的中英文版本去比對，
+所以**改這三句的文字時，要確認狀態列還認得出來**。按「停止」就直接把那個程序關掉。
 打包成 exe 後同一支 exe 身兼兩職：不帶參數是啟動視窗，帶 `--overlay` 就是字幕程序。
 啟動視窗記住的設定存在 `launcher_settings.json`，Gemini 金鑰從視窗填的話會寫進 `.env`。
+設定檔裡「聲音來源」「只翻譯這個程式」存**空字串**代表不指定（畫面上的「Windows 預設喇叭」會跟著語言變，
+所以不能存顯示文字）；舊版設定檔存的中文顯示文字，`load_settings` 會自動換成空字串。
+
+**介面語言（`i18n.py`）。** 所有給人看的文字放在 `TEXTS`，每個 key 對應（繁體中文, English）兩份，
+程式裡用 `t("key", 空格名=值)` 拿目前語言的文字。字幕程式用的 key 都以 `ov_` 開頭。
+- 啟動視窗最上方右邊有語言選單，換語言時 `switch_lang` 會先用舊語言讀出目前的設定，
+  拆掉整個畫面再用新語言重畫（執行紀錄的內容保留），並立刻存進設定檔的 `ui_lang`。執行中不能換。
+- 按「開始」時用 `--ui-lang` 把語言傳給字幕程式，執行紀錄、字幕條上的「翻譯中⋯」就會是同一種語言。
+- 設定檔沒有 `ui_lang` 時（第一次打開），`system_lang()` 照 Windows 顯示語言猜：中文（繁簡都算）用中文，其他一律英文。
+- 下拉選單（翻譯方向、翻譯方式、辨識準確度）在 `launcher.py` 裡是「參數值 → i18n key」的對照表，
+  用 `label_of`／`value_of` 在畫面文字和參數值之間轉換。
+- 給 Gemini 的翻譯提示文字不是介面文字，不放 `i18n.py`，留在 `overlay_subtitle.py` 的 `DIRECTIONS`。
 
 **打包 exe（`build_exe.py`）。** 用 PyInstaller（把 Python 程式連同需要的東西包成 exe 的工具）。
 pip 裝的 NVIDIA 元件 PyInstaller 不會自動收，要在 `nvidia_binaries()` 手動加，這些元件就佔了約 2GB。

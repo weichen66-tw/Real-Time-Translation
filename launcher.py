@@ -29,41 +29,30 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
 
+from i18n import LANGS, current_lang, set_lang, system_lang, t, variants
+
 FROZEN = getattr(sys, "frozen", False)
 HERE = (Path(sys.executable).resolve().parent if FROZEN
         else Path(__file__).resolve().parent)
 SETTINGS_FILE = HERE / "launcher_settings.json"
 ENV_FILE = HERE / ".env"
 
-APP_TITLE = "遊戲即時字幕"
 UI_FONT = ("Microsoft JhengHei", 10)
-DEFAULT_DEVICE = "Windows 預設喇叭"
-NO_APP = "（不指定，錄整台電腦的聲音）"
+# 設定檔裡「聲音來源」「只翻譯這個程式」存空字串代表不指定；
+# 畫面上顯示的「Windows 預設喇叭」這類文字會跟著介面語言變，所以不能直接存它
+DEFAULT_DEVICE = ""
+NO_APP = ""
+# 舊版設定檔直接存了中文的顯示文字，讀進來時換成空字串
+LEGACY_BLANKS = {"device": "Windows 預設喇叭", "app": "（不指定，錄整台電腦的聲音）"}
 MAX_LOG_LINES = 500
 
-# 畫面上顯示的文字 → 傳給字幕程式的參數值
-DIRECTIONS = {
-    "英文 → 中文（對方講英文，字幕顯示中文翻譯）": "en-zh",
-    "中文 → 英文（對方講中文，字幕顯示英文翻譯）": "zh-en",
-}
-TRANSLATORS = {
-    "Google 翻譯（快，不用金鑰）": "google",
-    "Gemini（比較口語，但慢，需要金鑰）": "gemini",
-}
-MODELS = {
-    "快速（base，比較不準）": "base",
-    "標準（small）": "small",
-    "精準（large-v3-turbo，需要 NVIDIA 顯示卡）": "large-v3-turbo",
-}
-DEFAULTS = {"device": DEFAULT_DEVICE, "app": NO_APP, "direction": "en-zh",
-            "translator": "google", "model": "small",
+# 傳給字幕程式的參數值 → 畫面上顯示的文字（i18n.py 裡的 key）
+DIRECTIONS = {"en-zh": "dir_en_zh", "zh-en": "dir_zh_en"}
+TRANSLATORS = {"google": "tr_google", "gemini": "tr_gemini"}
+MODELS = {"base": "model_base", "small": "model_small", "large-v3-turbo": "model_large"}
+DEFAULTS = {"ui_lang": system_lang(), "device": DEFAULT_DEVICE, "app": NO_APP,
+            "direction": "en-zh", "translator": "google", "model": "small",
             "lines": 3, "min_rms": 200, "max_seconds": 8, "click_through": False}
-
-TIPS = ("① 遊戲請設成「無邊框視窗」（全螢幕獨佔會看不到字幕）\n"
-        "② 選好下面的設定，按「開始」\n"
-        "③ 用滑鼠把字幕拖到喜歡的位置，拖右下角的握把 ◢ 可以調寬度（都會自動記住）\n"
-        "④ 遊戲中隨時可用：Ctrl+Alt+方向鍵 移動字幕、Ctrl+Alt+L 鎖定／解鎖\n"
-        "　　（鎖定＝滑鼠穿透，不會擋到遊戲操作）")
 
 
 # ══════════════════════════════════════════════════════
@@ -75,7 +64,13 @@ def load_settings():
         saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         saved = {}
-    return {**DEFAULTS, **{k: v for k, v in saved.items() if k in DEFAULTS}}
+    settings = {**DEFAULTS, **{k: v for k, v in saved.items() if k in DEFAULTS}}
+    for key, old_text in LEGACY_BLANKS.items():
+        if settings[key] == old_text:
+            settings[key] = ""
+    if settings["ui_lang"] not in LANGS:
+        settings["ui_lang"] = DEFAULTS["ui_lang"]
+    return settings
 
 
 def save_settings(settings):
@@ -174,10 +169,10 @@ def build_overlay_args(s):
     args = ["--overlay", "--model", s["model"], "--min-rms", str(s["min_rms"]),
             "--lines", str(s["lines"]), "--direction", s["direction"],
             "--translator", s["translator"],
-            "--max-seconds", str(s["max_seconds"])]
-    if s["app"] != NO_APP:
+            "--max-seconds", str(s["max_seconds"]), "--ui-lang", s["ui_lang"]]
+    if s["app"]:
         args += ["--app", s["app"]]          # 指定程式時就不看聲音來源了
-    elif s["device"] != DEFAULT_DEVICE:
+    elif s["device"]:
         args += ["--device", s["device"]]
     if s["click_through"]:
         args.append("--click-through")
@@ -186,10 +181,19 @@ def build_overlay_args(s):
 
 def label_of(mapping, value):
     """由參數值找回畫面上顯示的文字；找不到（例如設定檔被改壞）就用第一個"""
-    for label, v in mapping.items():
-        if v == value:
-            return label
+    return t(mapping.get(value, next(iter(mapping.values()))))
+
+
+def value_of(mapping, label):
+    """由畫面上顯示的文字找回參數值；找不到就用第一個"""
+    for value, key in mapping.items():
+        if t(key) == label:
+            return value
     return next(iter(mapping))
+
+
+def labels_of(mapping):
+    return [t(key) for key in mapping.values()]
 
 
 # ══════════════════════════════════════════════════════
@@ -202,61 +206,98 @@ class Launcher:
         self.last_was_progress = False
         self.log_q = queue.Queue()
         self.inputs = []            # 執行中要鎖住的輸入元件
+        self.outer = None
 
         self.root = tk.Tk()
-        self.root.title(APP_TITLE)
         self.root.minsize(600, 600)
         self.root.option_add("*Font", UI_FONT)
         ttk.Style().configure(".", font=UI_FONT)
-
-        outer = ttk.Frame(self.root, padding=14)
-        outer.pack(fill="both", expand=True)
-        self.build_tips(outer)
-        self.build_form(outer, load_settings())
-        self.build_controls(outer)
-        self.build_log(outer)
+        self.build(load_settings())
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(100, self.poll)
 
     # ── 畫面 ──
+    def build(self, s):
+        """用 s 的設定和語言把整個畫面畫出來；換語言時會先拆掉舊畫面再呼叫一次"""
+        set_lang(s["ui_lang"])
+        self.root.title(t("app_title"))
+        self.inputs = []
+        self.outer = ttk.Frame(self.root, padding=14)
+        self.outer.pack(fill="both", expand=True)
+        self.build_lang_bar(self.outer)
+        self.build_tips(self.outer)
+        self.build_form(self.outer, s)
+        self.build_controls(self.outer)
+        self.build_log(self.outer)
+
+    def build_lang_bar(self, parent):
+        """最上方右邊的語言選單。標籤中英文都寫，看不懂中文的人也找得到"""
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x", pady=(0, 8))
+        self.lang_var = tk.StringVar(value=LANGS[current_lang()])
+        combo = ttk.Combobox(bar, textvariable=self.lang_var, values=list(LANGS.values()),
+                             state="readonly", width=12)
+        combo.pack(side="right")
+        combo.bind("<<ComboboxSelected>>", lambda _: self.switch_lang())
+        ttk.Label(bar, text=t("lang_label")).pack(side="right", padx=(0, 6))
+        self.inputs.append(combo)
+
+    def switch_lang(self):
+        """
+        換介面語言：先用舊語言讀出目前填好的設定，再用新語言把畫面整個重畫。
+        執行中語言選單是鎖住的，所以只會在沒執行時發生；執行紀錄的內容會保留。
+        """
+        lang = next(code for code, name in LANGS.items() if name == self.lang_var.get())
+        if lang == current_lang():
+            return
+        s = {**self.read_form(), "ui_lang": lang}
+        save_settings(s)
+        log_text = self.log.get("1.0", "end-1c")
+        self.outer.destroy()
+        self.build(s)
+        if log_text:
+            self.log.configure(state="normal")
+            self.log.insert("end", log_text + "\n")
+            self.log.configure(state="disabled")
+
     def build_tips(self, parent):
-        box = ttk.LabelFrame(parent, text="使用步驟", padding=10)
+        box = ttk.LabelFrame(parent, text=t("tips_title"), padding=10)
         box.pack(fill="x")
-        ttk.Label(box, text=TIPS, justify="left").pack(anchor="w")
+        ttk.Label(box, text=t("tips"), justify="left").pack(anchor="w")
 
     def build_form(self, parent, s):
-        box = ttk.LabelFrame(parent, text="設定", padding=10)
+        box = ttk.LabelFrame(parent, text=t("settings_title"), padding=10)
         box.pack(fill="x", pady=(10, 0))
         box.columnconfigure(1, weight=1)
 
         self.app_var = tk.StringVar()
-        self.app_box = self.add_combo(box, 0, "只翻譯這個程式", self.app_var, [])
+        self.app_box = self.add_combo(box, 0, t("app_label"), self.app_var, [])
         self.app_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_source_state())
-        refresh_app = ttk.Button(box, text="重新整理", command=self.refresh_apps)
+        refresh_app = ttk.Button(box, text=t("refresh"), command=self.refresh_apps)
         refresh_app.grid(row=0, column=2, padx=(6, 0))
         self.inputs.append(refresh_app)
-        self.add_hint(box, 1, "選 Discord 就只翻譯 Discord 的聲音，遊戲角色講話不會被翻。"
-                              "\n清單裡沒有的話，先把那個程式打開，再按「重新整理」")
+        self.add_hint(box, 1, t("app_hint"))
         self.refresh_apps(select=s["app"])
 
         self.device_var = tk.StringVar()
-        self.device_box = self.add_combo(box, 2, "聲音來源", self.device_var, [])
-        self.device_refresh = ttk.Button(box, text="重新整理", command=self.refresh_devices)
+        self.device_box = self.add_combo(box, 2, t("device_label"), self.device_var, [])
+        self.device_refresh = ttk.Button(box, text=t("refresh"), command=self.refresh_devices)
         self.device_refresh.grid(row=2, column=2, padx=(6, 0))
         self.device_hint = self.add_hint(box, 3, "")
         self.refresh_devices(select=s["device"])
         self.refresh_source_state()
 
         self.direction_var = tk.StringVar(value=label_of(DIRECTIONS, s["direction"]))
-        self.add_combo(box, 4, "翻譯方向", self.direction_var, list(DIRECTIONS))
-        self.add_hint(box, 5, "對方講什麼語言就選哪個；選錯的話會聽不出字或變亂碼")
+        self.add_combo(box, 4, t("direction_label"), self.direction_var, labels_of(DIRECTIONS))
+        self.add_hint(box, 5, t("direction_hint"))
 
         self.translator_var = tk.StringVar(value=label_of(TRANSLATORS, s["translator"]))
-        combo = self.add_combo(box, 6, "翻譯方式", self.translator_var, list(TRANSLATORS))
+        combo = self.add_combo(box, 6, t("translator_label"), self.translator_var,
+                               labels_of(TRANSLATORS))
         combo.bind("<<ComboboxSelected>>", lambda _: self.refresh_key_state())
 
-        ttk.Label(box, text="Gemini 金鑰").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("key_label")).grid(row=7, column=0, sticky="w", pady=4)
         self.key_var = tk.StringVar()
         self.key_entry = ttk.Entry(box, textvariable=self.key_var, show="•")
         self.key_entry.grid(row=7, column=1, sticky="ew", pady=4)
@@ -264,33 +305,32 @@ class Launcher:
         self.refresh_key_state()
 
         self.model_var = tk.StringVar(value=label_of(MODELS, s["model"]))
-        self.add_combo(box, 9, "辨識準確度", self.model_var, list(MODELS))
+        self.add_combo(box, 9, t("model_label"), self.model_var, labels_of(MODELS))
 
-        ttk.Label(box, text="字幕行數").grid(row=10, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("lines_label")).grid(row=10, column=0, sticky="w", pady=4)
         self.lines_var = tk.StringVar(value=str(s["lines"]))
         spin = ttk.Spinbox(box, from_=1, to=5, width=5, textvariable=self.lines_var,
                            state="readonly")
         spin.grid(row=10, column=1, sticky="w", pady=4)
         self.inputs.append(spin)
 
-        ttk.Label(box, text="切段秒數").grid(row=11, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("seconds_label")).grid(row=11, column=0, sticky="w", pady=4)
         self.seconds_var = tk.StringVar(value=str(s["max_seconds"]))
         seconds = ttk.Spinbox(box, from_=2, to=30, width=5, state="readonly",
                               textvariable=self.seconds_var)
         seconds.grid(row=11, column=1, sticky="w", pady=4)
         self.inputs.append(seconds)
-        self.add_hint(box, 12, "講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷")
+        self.add_hint(box, 12, t("seconds_hint"))
 
         self.build_rms_row(box, 13, s["min_rms"])
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
-        check = ttk.Checkbutton(box, variable=self.click_var,
-                                text="一開始就鎖定字幕（滑鼠穿透，不會擋到遊戲操作；隨時可按 Ctrl+Alt+L 解鎖）")
+        check = ttk.Checkbutton(box, variable=self.click_var, text=t("click_through"))
         check.grid(row=15, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
     def build_rms_row(self, box, row, value):
-        ttk.Label(box, text="音量門檻").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("rms_label")).grid(row=row, column=0, sticky="w", pady=4)
         self.rms_var = tk.IntVar(value=int(value))
         value_label = ttk.Label(box, width=5)
 
@@ -304,7 +344,7 @@ class Launcher:
         scale.grid(row=row, column=1, sticky="ew", pady=4)
         value_label.grid(row=row, column=2, padx=(6, 0))
         self.inputs.append(scale)
-        self.add_hint(box, row + 1, "遊戲音效太吵、字幕一直亂跳 → 調高；別人講話沒反應 → 調低")
+        self.add_hint(box, row + 1, t("rms_hint"))
 
     def add_combo(self, box, row, label, var, values):
         ttk.Label(box, text=label).grid(row=row, column=0, sticky="w", pady=4)
@@ -321,16 +361,16 @@ class Launcher:
     def build_controls(self, parent):
         bar = ttk.Frame(parent)
         bar.pack(fill="x", pady=(12, 0))
-        self.start_btn = ttk.Button(bar, text="▶ 開始", command=self.start)
+        self.start_btn = ttk.Button(bar, text=t("start"), command=self.start)
         self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(bar, text="■ 停止", command=self.stop)
+        self.stop_btn = ttk.Button(bar, text=t("stop"), command=self.stop)
         self.stop_btn.pack(side="left", padx=(8, 0))
         self.stop_btn.state(["disabled"])
-        self.status_var = tk.StringVar(value="尚未開始")
+        self.status_var = tk.StringVar(value=t("status_idle"))
         ttk.Label(bar, textvariable=self.status_var).pack(side="left", padx=(14, 0))
 
     def build_log(self, parent):
-        box = ttk.LabelFrame(parent, text="執行紀錄", padding=6)
+        box = ttk.LabelFrame(parent, text=t("log_title"), padding=6)
         box.pack(fill="both", expand=True, pady=(10, 0))
         self.log = tk.Text(box, height=10, state="disabled", wrap="word",
                            font=("Consolas", 9), bg="#f7f7f7", relief="flat")
@@ -341,40 +381,42 @@ class Launcher:
 
     # ── 畫面狀態 ──
     def refresh_devices(self, select=None):
-        names = [DEFAULT_DEVICE] + list_devices()
+        """select 是設定檔裡存的值（空字串＝預設喇叭）；沒給就保留畫面上目前選的"""
+        default = t("default_device")
+        names = [default] + list_devices()
         self.device_box.config(values=names)
-        want = select or self.device_var.get()
-        self.device_var.set(want if want in names else DEFAULT_DEVICE)
+        want = self.device_var.get() if select is None else (select or default)
+        self.device_var.set(want if want in names else default)
 
     def refresh_apps(self, select=None):
-        names = [NO_APP] + list_apps()
+        """select 是設定檔裡存的值（空字串＝不指定）；沒給就保留畫面上目前選的"""
+        none = t("no_app")
+        names = [none] + list_apps()
         self.app_box.config(values=names)
-        want = select or self.app_var.get()
-        self.app_var.set(want if want in names else NO_APP)
+        want = self.app_var.get() if select is None else (select or none)
+        self.app_var.set(want if want in names else none)
 
     def is_running(self):
         return self.proc is not None and self.proc.poll() is None
 
     def refresh_source_state(self):
         """指定了程式之後，「聲音來源」就用不到了，把它變灰避免誤會"""
-        whole_pc = self.app_var.get() == NO_APP
+        whole_pc = self.app_var.get() == t("no_app")
         running = self.is_running()
         for w in (self.device_box, self.device_refresh):
             w.state(["!disabled"] if whole_pc and not running else ["disabled"])
-        self.device_hint.config(
-            text="別人講話的聲音從哪個喇叭／耳機播出來，就選哪個" if whole_pc
-            else "已指定程式，這項用不到")
+        self.device_hint.config(text=t("device_hint") if whole_pc else t("device_hint_disabled"))
 
     def refresh_key_state(self):
-        using_gemini = TRANSLATORS[self.translator_var.get()] == "gemini"
+        using_gemini = value_of(TRANSLATORS, self.translator_var.get()) == "gemini"
         running = self.is_running()
         self.key_entry.state(["!disabled"] if using_gemini and not running else ["disabled"])
         if not using_gemini:
-            self.key_hint.config(text="用 Google 翻譯不需要金鑰")
+            self.key_hint.config(text=t("key_hint_google"))
         elif has_gemini_key():
-            self.key_hint.config(text="✔ 已設定（要換新金鑰才需要填）")
+            self.key_hint.config(text=t("key_hint_saved"))
         else:
-            self.key_hint.config(text="到 https://aistudio.google.com/apikey 免費申請後貼上")
+            self.key_hint.config(text=t("key_hint_missing"))
 
     def set_running(self, running):
         for w in self.inputs:
@@ -393,12 +435,14 @@ class Launcher:
             max_seconds = min(max(int(self.seconds_var.get()), 2), 30)
         except ValueError:
             max_seconds = DEFAULTS["max_seconds"]
+        device, app = self.device_var.get(), self.app_var.get()
         return {
-            "device": self.device_var.get() or DEFAULT_DEVICE,
-            "app": self.app_var.get() or NO_APP,
-            "direction": DIRECTIONS[self.direction_var.get()],
-            "translator": TRANSLATORS[self.translator_var.get()],
-            "model": MODELS[self.model_var.get()],
+            "ui_lang": current_lang(),
+            "device": DEFAULT_DEVICE if device == t("default_device") else device,
+            "app": NO_APP if app == t("no_app") else app,
+            "direction": value_of(DIRECTIONS, self.direction_var.get()),
+            "translator": value_of(TRANSLATORS, self.translator_var.get()),
+            "model": value_of(MODELS, self.model_var.get()),
             "lines": lines,
             "max_seconds": max_seconds,
             "min_rms": self.rms_var.get(),
@@ -411,15 +455,13 @@ class Launcher:
             try:
                 save_gemini_key(new_key)
             except OSError as e:
-                messagebox.showerror(APP_TITLE, f"金鑰存檔失敗：{e}")
+                messagebox.showerror(t("app_title"), t("err_key_save", error=e))
                 return False
             self.key_var.set("")
             return True
         if has_gemini_key():
             return True
-        messagebox.showwarning(APP_TITLE, "選了 Gemini 翻譯，但還沒有金鑰。\n\n"
-                               "請到 https://aistudio.google.com/apikey 免費申請，"
-                               "貼到「Gemini 金鑰」欄位；或改用 Google 翻譯。")
+        messagebox.showwarning(t("app_title"), t("warn_no_key"))
         return False
 
     # ── 開始／停止 ──
@@ -441,20 +483,20 @@ class Launcher:
                 env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
                 creationflags=subprocess.CREATE_NO_WINDOW)
         except OSError as e:
-            messagebox.showerror(APP_TITLE, f"無法啟動字幕程式：{e}")
+            messagebox.showerror(t("app_title"), t("err_start", error=e))
             return
 
         self.stopping = False
         self.clear_log()
         # exe 版第一次開啟時，Windows 防毒會先掃描約 2GB 的顯示卡元件，實測要等一分鐘多
-        self.status_var.set("啟動中⋯（第一次開啟可能要等 1～2 分鐘，防毒軟體在檢查檔案）")
+        self.status_var.set(t("status_starting"))
         self.set_running(True)
         threading.Thread(target=self.pump, args=(self.proc,), daemon=True).start()
 
     def stop(self):
         if self.is_running():
             self.stopping = True
-            self.status_var.set("停止中⋯")
+            self.status_var.set(t("status_stopping"))
             self.proc.terminate()
 
     def on_close(self):
@@ -479,19 +521,20 @@ class Launcher:
         self.root.after(100, self.poll)
 
     def update_status(self, line):
-        if "載入模型中" in line:
-            self.status_var.set("載入語音辨識模型中⋯（第一次使用要下載模型，可能要幾分鐘）")
-        elif line.startswith("模型："):
-            self.status_var.set(f"{line}，準備錄音⋯")
-        elif "字幕視窗已開啟" in line:
-            self.status_var.set("✅ 運作中：有人講話就會出現字幕")
+        """認字幕程式印出來的特定訊息來更新狀態列；中英文版本都認，文字都在 i18n.py"""
+        if any(text in line for text in variants("ov_loading")):
+            self.status_var.set(t("status_loading"))
+        elif any(line.startswith(prefix) for prefix in variants("ov_model_prefix")):
+            self.status_var.set(t("status_model", line=line))
+        elif any(text.strip() in line for text in variants("ov_window_open")):
+            self.status_var.set(t("status_running"))
 
     def on_exit(self, code):
         self.set_running(False)
         if self.stopping or code == 0:
-            self.status_var.set("已停止")
+            self.status_var.set(t("status_stopped"))
         else:
-            self.status_var.set(f"⚠️ 字幕程式意外結束（代碼 {code}），請看下方紀錄")
+            self.status_var.set(t("status_crashed", code=code))
 
     def append_log(self, line):
         # 下載模型時的進度條會一直印新的一行，只保留最新那一行
