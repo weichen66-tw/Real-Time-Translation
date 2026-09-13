@@ -182,11 +182,9 @@ Windows 規定註冊和收訊息要在同一個執行緒，所以兩件事都在
 - **金鑰放在 `.env`**（格式是一行 `GEMINI_API_KEY=金鑰`），`.env` 已列在 `.gitignore`，不會被上傳。
   `overlay_subtitle.py` 的 `read_key()` 會先讀 `.env`，找不到再讀 `GEMINI_API_KEY` 這個系統環境變數
   （存在電腦裡、不會跟著程式碼一起上傳的設定值）。請不要再往專案裡放任何密碼或金鑰。
-- **舊的 `gemini_key.txt` 曾經被上傳到 git**，雖然現在已經移除，但 git 的歷史紀錄裡還查得到那把舊金鑰。
-  真正的解法是到 https://aistudio.google.com/apikey 重新申請一把新的、讓舊的失效。
 - `transcript.txt`（每次執行都會往後接的逐字稿）和 `overlay_pos.json`（記住字幕視窗位置）
   這兩個檔案是程式跑出來的，但也被上傳到 git 了。所以只要手動跑過程式，
   git 就會顯示這兩個檔案「有變動」，這是正常的。
-- `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）列了金鑰（`.env`、`gemini_key.txt`）、
+- `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）列了金鑰（`.env`）、
   `launcher_settings.json`，以及打包產生的 `build/`、`dist/`、`*.spec`、`__pycache__/`。
 - `dist/遊戲即時字幕/` 每次打包都會被整個清掉重做，不要把自己的東西放在裡面。

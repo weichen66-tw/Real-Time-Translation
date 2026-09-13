@@ -1,6 +1,5 @@
 # 金鑰與密碼，絕對不要上傳
 .env
-gemini_key.txt
 
 # 啟動視窗記住的個人設定
 launcher_settings.json
