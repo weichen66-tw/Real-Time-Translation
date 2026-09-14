@@ -28,8 +28,7 @@ APP_DIR = DIST / APP_NAME
 ZIP_FILE = DIST / f"{APP_NAME}.zip"
 
 # 程式執行時才會產生、屬於個人的檔案，絕對不能打包進給別人的壓縮檔
-PERSONAL_FILES = {".env", "gemini_key.txt", "launcher_settings.json",
-                  "overlay_pos.json", "transcript.txt"}
+PERSONAL_FILES = {".env", "launcher_settings.json", "overlay_pos.json", "transcript.txt"}
 
 # 給使用者看的說明（中文、英文），打包時複製到 exe 旁邊
 GUIDES = ("使用說明.txt", "User Guide (English).txt")

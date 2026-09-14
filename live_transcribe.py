@@ -44,7 +44,6 @@ MAX_SEGMENT_SEC = 8.0        # 講太久也要強制切段（--max-seconds 可�
 OUT_FILE = Path(__file__).resolve().parent / "transcript.txt"
 
 audio_q: "queue.Queue[np.ndarray]" = queue.Queue()
-running = True
 
 
 def list_loopback_devices():
@@ -98,7 +97,7 @@ def capture_thread(dev, rate, channels):
                     input=True,
                     input_device_index=dev["index"],
                     frames_per_buffer=CHUNK) as stream:
-            while running:
+            while True:
                 data = stream.read(CHUNK, exception_on_overflow=False)
                 raw = np.frombuffer(data, dtype=np.int16)
                 audio_q.put(to_mono_16k(raw, rate, channels))

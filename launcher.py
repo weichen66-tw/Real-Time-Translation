@@ -15,7 +15,7 @@
 
 開發時：
     py launcher.py
-    py launcher.py --list-apps    # 排查用：列出目前發出過聲音的程式
+    py launcher.py --list-apps    # 排查用：列出「只翻譯這個程式」清單會出現的程式（發出過聲音的、有開視窗的）
 """
 
 import os

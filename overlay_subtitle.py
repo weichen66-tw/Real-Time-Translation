@@ -9,6 +9,7 @@ Ctrl+Alt+方向鍵可以移動、Ctrl+Alt+L 切換鎖定（鎖定＝滑鼠穿透
 
 安裝：
     py -m pip install pyaudiowpatch numpy scipy faster-whisper
+    py -m pip install proc-tap pycaw          # --app 只錄單一程式時要用（psutil 會跟著 pycaw 一起裝）
     py -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"   # 有 NVIDIA 顯示卡才需要
 
 翻譯設定：
