@@ -67,6 +67,7 @@ import pyaudiowpatch as pyaudio
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
 
+import whisper_models
 from i18n import set_lang, system_lang, t
 
 # ── 音訊設定 ──────────────────────────────────────────
@@ -244,7 +245,11 @@ def load_model(name, force_cpu=False):
     """
     先試 GPU，但必須「實際跑一次推論」成功才算數。
     只建立模型不會觸發 CUDA 函式庫載入，所以一定要試跑。
+    模型從哪裡來交給 whisper_models.resolve 決定：旁邊的 models 資料夾裡有就直接用，
+    沒有才會上網下載（一般使用者是在啟動視窗先下載好的）。
     """
+    source = whisper_models.resolve(name)
+
     def warmup(m):
         dummy = (np.random.rand(TARGET_RATE).astype(np.float32) - 0.5) * 0.01
         list(m.transcribe(dummy, language="en", beam_size=1,
@@ -253,14 +258,14 @@ def load_model(name, force_cpu=False):
     if not force_cpu:
         add_nvidia_dll_dirs()
         try:
-            m = WhisperModel(name, device="cuda", compute_type="float16")
+            m = WhisperModel(source, device="cuda", compute_type="float16")
             warmup(m)
             print(f"{t('ov_model_prefix')}{name} (GPU)")
             return m
         except Exception as e:
             print(t("ov_gpu_unavailable", error=type(e).__name__))
 
-    m = WhisperModel(name, device="cpu", compute_type="int8")
+    m = WhisperModel(source, device="cpu", compute_type="int8")
     warmup(m)
     print(f"{t('ov_model_prefix')}{name} (CPU)")
     return m

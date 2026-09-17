@@ -20,7 +20,8 @@
 翻譯方向有兩種：英文 → 中文（預設）、中文 → 英文，由使用者自己選，不會自動判斷語言。
 
 一般使用者的入口是 `launcher.py`（啟動視窗）：用點的選設定、按「開始」，不用記指令參數。
-要給沒裝 Python 的朋友用時，用 `build_exe.py` 打包成 exe。
+要給沒裝 Python 的朋友用時，用 `build_exe.py` 打包成 exe，
+預設的語音辨識模型會一起包進去，朋友不用自己下載。
 這個專案沒有自動測試、也沒有記錄套件清單的檔案。
 程式裡的註解一律用繁體中文。啟動視窗和字幕程式**給人看的文字有中文、英文兩種**（讓外國朋友也能用），
 全部集中在 `i18n.py`，新增或修改訊息時兩種語言都要寫（見下方「介面語言」）。
@@ -60,6 +61,9 @@ py overlay_subtitle.py --ui-lang en        # 印出來的訊息用英文（預�
 py overlay_subtitle.py --translator gemini # 改用 Gemini 翻譯（預設 google）
 py overlay_subtitle.py --max-seconds 5     # 講不停時最多幾秒切一段（預設 8）
 py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不錄遊戲音效
+
+# 下載語音辨識模型到 models/（啟動視窗的「下載」按鈕就是叫這個，平常不用自己打）
+py launcher.py --download-model small
 ```
 
 第二、三階段共用的幾個選項：`--model`（選 whisper 模型大小，預設 `small`，越大越準但越慢）、
@@ -82,13 +86,28 @@ py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不�
 **這代表：** 只要修到 `find_loopback`、`to_mono_16k`、`load_model`、`add_nvidia_dll_dirs` 或聲音切段那段邏輯，
 通常 `live_transcribe.py` 和 `overlay_subtitle.py` **兩個檔案都要改**，不能只改一邊。
 
+**語音辨識模型放哪裡（`whisper_models.py`）。** 模型一律放在 exe 旁邊
+（開發時是專案資料夾）的 `models/<模型名>/`。`resolve()` 決定要餵給 `WhisperModel` 什麼：
+那個資料夾裡有就給資料夾路徑，沒有就給模型名字（走原本上網下載的老路）。
+`is_ready()` 多看一個地方——以前下載到 Hugging Face 快取（`~/.cache/huggingface/hub`）裡的模型
+也算備妥，這樣舊版使用者升級後不會被要求再下載一次。
+`load_model` 只能透過 `resolve()` 拿模型來源，**`overlay_subtitle.py` 和 `live_transcribe.py`
+兩邊都要一致**。實測朋友的網路下載速度約 0.8 MB/秒，`small` 要 10 分鐘、`large-v3-turbo` 要半小時以上，
+這就是「內建模型」這件事存在的原因。
+
 **啟動視窗（`launcher.py`）。** 它本身不做錄音或辨識，按「開始」時是另外開一個程序
 （程序 = 一個獨立在跑的程式）去跑 `overlay_subtitle.main()`，把畫面上的設定轉成
 `--model`、`--translator` 這些參數傳過去，再把對方印出來的訊息一行行接回來顯示在「執行紀錄」區，
 也靠這些訊息（例如「字幕視窗已開啟」）更新狀態列。`update_status` 是拿 `i18n.py` 裡
 `ov_loading`、`ov_model_prefix`、`ov_window_open` 這三句的中英文版本去比對，
 所以**改這三句的文字時，要確認狀態列還認得出來**。按「停止」就直接把那個程序關掉。
-打包成 exe 後同一支 exe 身兼兩職：不帶參數是啟動視窗，帶 `--overlay` 就是字幕程序。
+打包成 exe 後同一支 exe 身兼多職：不帶參數是啟動視窗，帶 `--overlay` 是字幕程序，
+帶 `--download-model 名稱` 是下載模型的程序（`child_cmd` 負責組這個指令）。
+「辨識準確度」旁邊有「下載」按鈕和一行狀態（已備妥／尚未下載約幾 MB），
+按下去會開 `DownloadDialog`：它開一個下載程序，進度是量 `models/<名稱>` 資料夾變多大算出來的
+（faster-whisper 把下載套件內建的進度顯示關掉了，讀不到百分比）。
+按「取消」就把那個程序關掉，已下載的部分會留著、下次接續。
+按「開始」時模型不在，會先問要不要現在下載（`ensure_model`）。
 啟動視窗記住的設定存在 `launcher_settings.json`，Gemini 金鑰從視窗填的話會寫進 `.env`。
 設定檔裡「聲音來源」「只翻譯這個程式」存**空字串**代表不指定（畫面上的「Windows 預設喇叭」會跟著語言變，
 所以不能存顯示文字）；舊版設定檔存的中文顯示文字，`load_settings` 會自動換成空字串。
@@ -105,6 +124,8 @@ py overlay_subtitle.py --app Discord.exe   # 只錄這個程式的聲音，不�
 
 **打包 exe（`build_exe.py`）。** 用 PyInstaller（把 Python 程式連同需要的東西包成 exe 的工具）。
 pip 裝的 NVIDIA 元件 PyInstaller 不會自動收，要在 `nvidia_binaries()` 手動加，這些元件就佔了約 2GB。
+`BUNDLED_MODELS` 列的模型會由 `bundle_models()` 複製到 exe 旁邊的 `models/`
+（這台電腦還沒有就先下載一次）。目前只內建 `small`，多包一個就多好幾百 MB。
 程式執行時產生的檔案（`.env`、`overlay_pos.json`、`transcript.txt`、`launcher_settings.json`）
 在 exe 版會存在 exe 旁邊（程式裡用 `sys.frozen` 判斷），壓縮檔會自動排除這些個人檔案。
 給使用者看的說明有兩份：`使用說明.txt`（中文）和 `User Guide (English).txt`（英文），
@@ -224,8 +245,10 @@ Windows 規定註冊和收訊息要在同一個執行緒，所以兩件事都在
   （存在電腦裡、不會跟著程式碼一起上傳的設定值）。請不要再往專案裡放任何密碼或金鑰。
 - `transcript.txt`（每次執行都會往後接的逐字稿，裡面是實際聽到的對話，屬於個人資料）和
   `overlay_pos.json`（記住字幕視窗位置，每台電腦都不一樣）是程式跑出來的檔案，**不會上傳 git**。
+- `models/`（下載好的語音辨識模型，好幾百 MB）也是程式產生的，**不會上傳 git**。
+  要重新產生就跑 `py launcher.py --download-model small`，或直接打包。
 - `.gitignore`（用來指定哪些檔案不要上傳 git 的清單檔）列了金鑰（`.env`）、
-  `launcher_settings.json`、`transcript.txt`、`overlay_pos.json`，
+  `launcher_settings.json`、`transcript.txt`、`overlay_pos.json`、`models/`，
   以及打包產生的 `build/`、`dist/`、`*.spec`、`__pycache__/`。
 - `dist/遊戲即時字幕/` 每次打包都會被整個清掉重做，不要把自己的東西放在裡面。
 
@@ -233,8 +256,9 @@ Windows 規定註冊和收訊息要在同一個執行緒，所以兩件事都在
 
 使用者說「代碼審查」時照這份做。
 
-**範圍**：專案裡所有 .py（launcher.py、overlay_subtitle.py、i18n.py、build_exe.py、
-live_transcribe.py、capture_test.py），不看 build/、dist/。使用者有指定檔案或範圍時照指定的做。
+**範圍**：專案裡所有 .py（launcher.py、overlay_subtitle.py、i18n.py、whisper_models.py、
+build_exe.py、live_transcribe.py、capture_test.py），不看 build/、dist/、models/。
+使用者有指定檔案或範圍時照指定的做。
 
 **檢查三件事**
 1. 死碼：沒被用到的函式、類別、常數、import、變數；永遠不會執行到的程式段落；

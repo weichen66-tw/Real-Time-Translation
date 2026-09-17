@@ -32,6 +32,8 @@ import pyaudiowpatch as pyaudio
 from scipy.signal import resample_poly
 from faster_whisper import WhisperModel
 
+import whisper_models
+
 CHUNK = 1024
 TARGET_RATE = 16000          # Whisper 要求的取樣率
 
@@ -121,7 +123,10 @@ def load_model(name: str, force_cpu: bool = False):
     先試 GPU，但必須「實際跑一次推論」成功才算數。
     只建立模型不會觸發 CUDA 函式庫載入，所以一定要試跑，
     否則會等到第一句話才炸掉。
+    模型從哪裡來交給 whisper_models.resolve 決定，跟 overlay_subtitle.py 一致。
     """
+    source = whisper_models.resolve(name)
+
     def warmup(m):
         dummy = (np.random.rand(TARGET_RATE).astype(np.float32) - 0.5) * 0.01
         list(m.transcribe(dummy, language="en", beam_size=1,
@@ -130,14 +135,14 @@ def load_model(name: str, force_cpu: bool = False):
     if not force_cpu:
         add_nvidia_dll_dirs()
         try:
-            m = WhisperModel(name, device="cuda", compute_type="float16")
+            m = WhisperModel(source, device="cuda", compute_type="float16")
             warmup(m)
             print(f"模型：{name} (GPU)")
             return m
         except Exception as e:
             print(f"GPU 不可用，改用 CPU（{type(e).__name__}）")
 
-    m = WhisperModel(name, device="cpu", compute_type="int8")
+    m = WhisperModel(source, device="cpu", compute_type="int8")
     warmup(m)
     print(f"模型：{name} (CPU)")
     return m

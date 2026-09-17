@@ -51,9 +51,8 @@ First run
 - The first time you press "Start", it may take 1–2 minutes to respond.
   Windows antivirus is scanning the files; it is not frozen. After that it
   opens in about 3 seconds.
-- The speech recognition model downloads automatically ("Standard" is about
-  460 MB) and needs an internet connection. Wait until the status at the
-  bottom says "Running". It only downloads once.
+- The "Standard" speech recognition model is already included, so there is
+  nothing to download before you can start.
 - Windows may show "Windows protected your PC":
   click "More info" → "Run anyway".
   (This appears because the program isn't signed with a paid digital
@@ -85,6 +84,19 @@ Moving and resizing the subtitles
 - Position and width are remembered for next time.
 
 
+Changing the accuracy (Fast / Accurate)
+---------------------------------------
+Only "Standard" is included. If you switch "Accuracy" to "Fast" or
+"Accurate", the line below says it hasn't been downloaded yet: press
+"Download" on the right and wait for the progress bar.
+- "Fast" is about 140 MB, "Accurate" about 1.5 GB. On a slow connection
+  "Accurate" can take half an hour or more.
+- You can press "Cancel" while downloading. What was already downloaded is
+  kept, so it resumes from there next time.
+- Each model only has to be downloaded once.
+- If you press "Start" before downloading, it asks whether to download now.
+
+
 Troubleshooting
 ---------------
 - Can't see the subtitles → set the game to "Borderless window";
@@ -98,3 +110,6 @@ Troubleshooting
   launcher window and press "Stop".
 - The translation line keeps showing "—" → Google Translate may be
   temporarily unreachable; try Gemini instead.
+- The model download keeps failing → check your internet connection and press
+  "Download" again. "Standard" needs no download at all, so you can switch
+  back to it in the meantime.

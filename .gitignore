@@ -15,3 +15,6 @@ build/
 dist/
 *.spec
 __pycache__/
+
+# 下載好的語音辨識模型（好幾百 MB，打包時才會用到）
+models/

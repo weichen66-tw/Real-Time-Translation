@@ -9,9 +9,10 @@
 另外開程序、而不是在同一個程序裡跑，是因為：停止時可以整個乾淨關掉
 （錄音、模型、網路連線一次釋放），字幕程序出錯也不會連啟動視窗一起當掉。
 
-打包成 exe 時，同一支 exe 身兼兩職：
-    遊戲即時字幕.exe                  → 開啟啟動視窗
-    遊戲即時字幕.exe --overlay 參數⋯   → 直接跑字幕（由啟動視窗自己呼叫）
+打包成 exe 時，同一支 exe 身兼多職：
+    遊戲即時字幕.exe                     → 開啟啟動視窗
+    遊戲即時字幕.exe --overlay 參數⋯      → 直接跑字幕（由啟動視窗自己呼叫）
+    遊戲即時字幕.exe --download-model 名稱 → 下載語音辨識模型（由下載進度視窗自己呼叫）
 
 開發時：
     py launcher.py
@@ -29,6 +30,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
 
+import whisper_models
 from i18n import LANGS, current_lang, set_lang, system_lang, t, variants
 
 FROZEN = getattr(sys, "frozen", False)
@@ -164,6 +166,20 @@ def list_apps():
     return sounding + windowed
 
 
+def child_cmd(*args):
+    """
+    再開一個自己的程序要下什麼指令（字幕程序、下載模型的程序都用這個）。
+    打包成 exe 後直接叫自己；開發時 sys.executable 是 python.exe，要補上這支腳本的路徑。
+    """
+    base = [sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())])
+    return base + list(args)
+
+
+def human_size(n):
+    """把位元組換成人看得懂的大小，例如 464 MB、1.5 GB"""
+    return f"{n / 1024 ** 3:.1f} GB" if n >= 1024 ** 3 else f"{n / 1024 ** 2:,.0f} MB"
+
+
 def build_overlay_args(s):
     """把畫面上的設定轉成字幕程式的指令參數"""
     args = ["--overlay", "--model", s["model"], "--min-rms", str(s["min_rms"]),
@@ -194,6 +210,98 @@ def value_of(mapping, label):
 
 def labels_of(mapping):
     return [t(key) for key in mapping.values()]
+
+
+# ══════════════════════════════════════════════════════
+#  下載模型的進度視窗
+# ══════════════════════════════════════════════════════
+class DownloadDialog:
+    """
+    下載語音辨識模型時擋在啟動視窗前面的小視窗。
+
+    真正在下載的是另外開的一個程序（跟字幕程序同樣的做法），這樣做有兩個好處：
+    按「取消」可以直接把它關掉；下載很慢或連不上的時候，啟動視窗也不會整個卡住不能動。
+
+    進度是直接量 models/<名稱> 資料夾變多大算出來的。faster-whisper 把下載套件
+    內建的進度顯示關掉了，讀不到它的百分比，所以只能自己量。
+    """
+    POLL_MS = 400              # 每隔多久量一次資料夾大小
+
+    def __init__(self, parent, name):
+        self.name = name
+        self.total = whisper_models.total_bytes(name)
+        self.proc = None
+        self.result_q = queue.Queue()
+        self.ok = False
+        self.cancelled = False
+
+        self.top = tk.Toplevel(parent)
+        self.top.title(t("dl_title"))
+        self.top.resizable(False, False)
+        self.top.transient(parent)          # 跟著啟動視窗一起最小化
+        self.top.grab_set()                 # 下載期間不能去動啟動視窗
+        self.top.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        frame = ttk.Frame(self.top, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=label_of(MODELS, name)).pack(anchor="w")
+        self.bar = ttk.Progressbar(frame, length=400, maximum=100)
+        self.bar.pack(pady=(10, 6), fill="x")
+        self.text_var = tk.StringVar(value=t("dl_connecting"))
+        ttk.Label(frame, textvariable=self.text_var).pack(anchor="w")
+        ttk.Button(frame, text=t("dl_cancel"), command=self.cancel).pack(anchor="e",
+                                                                        pady=(14, 0))
+
+    def run(self):
+        """開始下載並等到結束；回傳有沒有成功"""
+        try:
+            self.proc = subprocess.Popen(
+                child_cmd("--download-model", self.name), cwd=HERE,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                creationflags=subprocess.CREATE_NO_WINDOW)
+        except OSError as e:
+            self.top.destroy()
+            messagebox.showerror(t("app_title"), t("dl_failed", error=e))
+            return False
+        threading.Thread(target=self.wait_for_exit, daemon=True).start()
+        self.tick()
+        self.top.wait_window()
+        return self.ok
+
+    def wait_for_exit(self):
+        """在背景等下載程序結束，順便把它印的訊息收起來（失敗時要拿來給使用者看）"""
+        out, _ = self.proc.communicate()
+        self.result_q.put((self.proc.returncode, out.strip()))
+
+    def tick(self):
+        """每隔一小段時間更新進度條，順便看下載程序結束了沒"""
+        done = whisper_models.downloaded_bytes(self.name)
+        if done and self.total:
+            # 檔案大小跟實際會差一點點，先壓在 99%，真的下載完才跳到 100%
+            self.bar.config(value=min(done * 100 / self.total, 99))
+            self.text_var.set(t("dl_progress", done=human_size(done),
+                                total=human_size(self.total)))
+        if self.result_q.empty():
+            self.top.after(self.POLL_MS, self.tick)
+            return
+        self.finish(*self.result_q.get())
+
+    def finish(self, code, out):
+        self.ok = code == 0 and whisper_models.has_local(self.name)
+        self.top.grab_release()
+        self.top.destroy()
+        if self.cancelled:
+            messagebox.showinfo(t("app_title"), t("dl_cancelled"))
+        elif not self.ok:
+            messagebox.showerror(t("app_title"), t("dl_failed", error=out or code))
+
+    def cancel(self):
+        """關掉下載程序；已經下載好的部分會留著，下次會從那裡接續"""
+        self.cancelled = True
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
 
 
 # ══════════════════════════════════════════════════════
@@ -305,28 +413,35 @@ class Launcher:
         self.refresh_key_state()
 
         self.model_var = tk.StringVar(value=label_of(MODELS, s["model"]))
-        self.add_combo(box, 9, t("model_label"), self.model_var, labels_of(MODELS))
+        self.model_box = self.add_combo(box, 9, t("model_label"), self.model_var,
+                                        labels_of(MODELS))
+        self.model_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_model_state())
+        self.model_btn = ttk.Button(box, text=t("download"), command=self.download_model)
+        self.model_btn.grid(row=9, column=2, padx=(6, 0))
+        self.inputs.append(self.model_btn)
+        self.model_hint = self.add_hint(box, 10, "")
+        self.refresh_model_state()
 
-        ttk.Label(box, text=t("lines_label")).grid(row=10, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("lines_label")).grid(row=11, column=0, sticky="w", pady=4)
         self.lines_var = tk.StringVar(value=str(s["lines"]))
         spin = ttk.Spinbox(box, from_=1, to=5, width=5, textvariable=self.lines_var,
                            state="readonly")
-        spin.grid(row=10, column=1, sticky="w", pady=4)
+        spin.grid(row=11, column=1, sticky="w", pady=4)
         self.inputs.append(spin)
 
-        ttk.Label(box, text=t("seconds_label")).grid(row=11, column=0, sticky="w", pady=4)
+        ttk.Label(box, text=t("seconds_label")).grid(row=12, column=0, sticky="w", pady=4)
         self.seconds_var = tk.StringVar(value=str(s["max_seconds"]))
         seconds = ttk.Spinbox(box, from_=2, to=30, width=5, state="readonly",
                               textvariable=self.seconds_var)
-        seconds.grid(row=11, column=1, sticky="w", pady=4)
+        seconds.grid(row=12, column=1, sticky="w", pady=4)
         self.inputs.append(seconds)
-        self.add_hint(box, 12, t("seconds_hint"))
+        self.add_hint(box, 13, t("seconds_hint"))
 
-        self.build_rms_row(box, 13, s["min_rms"])
+        self.build_rms_row(box, 14, s["min_rms"])
 
         self.click_var = tk.BooleanVar(value=bool(s["click_through"]))
         check = ttk.Checkbutton(box, variable=self.click_var, text=t("click_through"))
-        check.grid(row=15, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        check.grid(row=16, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.inputs.append(check)
 
     def build_rms_row(self, box, row, value):
@@ -407,6 +522,36 @@ class Launcher:
             w.state(["!disabled"] if whole_pc and not running else ["disabled"])
         self.device_hint.config(text=t("device_hint") if whole_pc else t("device_hint_disabled"))
 
+    def refresh_model_state(self):
+        """模型已經備妥就把「下載」變灰，還沒下載就提醒使用者要先下載、大約多大"""
+        name = value_of(MODELS, self.model_var.get())
+        ready = whisper_models.is_ready(name)
+        self.model_btn.state(["disabled"] if ready or self.is_running() else ["!disabled"])
+        self.model_hint.config(
+            text=t("model_hint_ready") if ready
+            else t("model_hint_missing", size=human_size(whisper_models.total_bytes(name))))
+
+    def download_model(self):
+        """「下載」按鈕：下載目前選的那個模型"""
+        self.open_download_dialog(value_of(MODELS, self.model_var.get()))
+
+    def open_download_dialog(self, name):
+        """開下載進度視窗，等它跑完再把畫面上的狀態更新一次；回傳有沒有成功"""
+        ok = DownloadDialog(self.root, name).run()
+        self.refresh_model_state()
+        return ok
+
+    def ensure_model(self, name):
+        """按「開始」時模型還沒下載，就先問要不要現在下載，下載成功才繼續"""
+        if whisper_models.is_ready(name):
+            return True
+        if not messagebox.askyesno(
+                t("app_title"),
+                t("dl_ask", model=label_of(MODELS, name),
+                  size=human_size(whisper_models.total_bytes(name)))):
+            return False
+        return self.open_download_dialog(name)
+
     def refresh_key_state(self):
         using_gemini = value_of(TRANSLATORS, self.translator_var.get()) == "gemini"
         running = self.is_running()
@@ -425,6 +570,7 @@ class Launcher:
         self.stop_btn.state(["!disabled"] if running else ["disabled"])
         self.refresh_key_state()
         self.refresh_source_state()
+        self.refresh_model_state()
 
     def read_form(self):
         try:
@@ -471,10 +617,11 @@ class Launcher:
         s = self.read_form()
         if s["translator"] == "gemini" and not self.ensure_gemini_key():
             return
+        if not self.ensure_model(s["model"]):
+            return
         save_settings(s)
 
-        cmd = [sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())])
-        cmd += build_overlay_args(s)
+        cmd = child_cmd(*build_overlay_args(s))
         try:
             self.proc = subprocess.Popen(
                 cmd, cwd=HERE, stdin=subprocess.DEVNULL,
@@ -571,9 +718,24 @@ def run_overlay(argv):
     overlay_subtitle.main()
 
 
+def run_download(name):
+    """
+    下載模型的子程序入口：進度視窗用 --download-model 呼叫自己時走這裡。
+    成功就安靜結束；失敗把原因印出來、用非 0 的結束代碼收場，進度視窗會把它顯示給使用者看。
+    """
+    try:
+        whisper_models.download(name)
+    except Exception as e:
+        print(f"{type(e).__name__}: {e}")
+        sys.exit(1)
+
+
 def main():
     if "--overlay" in sys.argv:
         run_overlay(sys.argv[sys.argv.index("--overlay") + 1:])
+        return
+    if "--download-model" in sys.argv:
+        run_download(sys.argv[sys.argv.index("--download-model") + 1])
         return
     if "--list-apps" in sys.argv:
         # 排查用：下拉選單抓不到程式時，用這個確認是清單抓不到還是視窗的問題

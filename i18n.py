@@ -74,6 +74,11 @@ TEXTS = {
     "model_small": ("標準（small）", "Standard (small)"),
     "model_large": ("精準（large-v3-turbo，需要 NVIDIA 顯示卡）",
                     "Accurate (large-v3-turbo, needs an NVIDIA GPU)"),
+    "download": ("下載", "Download"),
+    "model_hint_ready": ("✔ 已備妥，不用下載", "✔ Ready to use, no download needed"),
+    "model_hint_missing": ("尚未下載（約 {size}）→ 按右邊的「下載」，只要下載一次",
+                           'Not downloaded yet (about {size}) → press "Download" on the right;'
+                           " it only needs downloading once"),
     "lines_label": ("字幕行數", "Subtitle lines"),
     "seconds_label": ("切段秒數", "Max segment (s)"),
     "seconds_hint": ("講不停時最多幾秒就先送出字幕 → 調小出現得快，句子易被切斷",
@@ -98,13 +103,30 @@ TEXTS = {
         ' "Gemini API key", or switch to Google Translate.',
     ),
     "err_start": ("無法啟動字幕程式：{error}", "Couldn't start the subtitle program: {error}"),
+    "dl_title": ("下載語音辨識模型", "Downloading the speech model"),
+    "dl_connecting": ("連線中⋯", "Connecting…"),
+    "dl_progress": ("已下載 {done} ／ 共 {total}", "{done} of {total} downloaded"),
+    "dl_cancel": ("取消", "Cancel"),
+    "dl_ask": (
+        "「{model}」還沒下載（約 {size}），要現在下載嗎？\n\n"
+        "需要網路，只要下載一次，之後就不用了。",
+        '"{model}" hasn\'t been downloaded yet (about {size}). Download it now?\n\n'
+        "It needs an internet connection, and only has to be downloaded once.",
+    ),
+    "dl_failed": (
+        "下載失敗：\n\n{error}\n\n"
+        "請確認網路正常後，再按一次「下載」。已經下載的部分會保留，不會從頭來過。",
+        "Download failed:\n\n{error}\n\n"
+        'Check your internet connection and press "Download" again. What was already'
+        " downloaded is kept, so it resumes from there.",
+    ),
+    "dl_cancelled": ("已取消下載。下次再按「下載」會從中斷的地方接續。",
+                     'Download cancelled. Pressing "Download" again resumes where it stopped.'),
     "status_idle": ("尚未開始", "Not started"),
     "status_starting": ("啟動中⋯（第一次開啟可能要等 1～2 分鐘，防毒軟體在檢查檔案）",
                         "Starting… (the first run can take 1–2 minutes while antivirus scans the files)"),
     "status_stopping": ("停止中⋯", "Stopping…"),
-    "status_loading": ("載入語音辨識模型中⋯（第一次使用要下載模型，可能要幾分鐘）",
-                       "Loading the speech model… (the first run downloads it, this may take"
-                       " a few minutes)"),
+    "status_loading": ("載入語音辨識模型中⋯", "Loading the speech model…"),
     "status_model": ("{line}，準備錄音⋯", "{line}, getting ready to record…"),
     "status_running": ("✅ 運作中：有人講話就會出現字幕", "✅ Running: subtitles appear when someone speaks"),
     "status_stopped": ("已停止", "Stopped"),
@@ -177,8 +199,7 @@ TEXTS = {
     "ov_tr_no_key_hint": ("      （要翻譯的話，在 {file} 寫入 GEMINI_API_KEY=你的key，或改用 Google 翻譯）",
                           "      (To translate, add GEMINI_API_KEY=your_key to {file},"
                           " or use Google Translate)"),
-    "ov_loading": ("載入模型中，第一次執行需下載，請稍候⋯",
-                   "Loading model; the first run downloads it, please wait…"),
+    "ov_loading": ("載入模型中，請稍候⋯", "Loading the model, please wait…"),
     "ov_source_app": ("聲音來源：只錄「{name}」這個程式（含子程序，編號 {pid}）",
                       'Audio source: only "{name}" (including its child processes, PID {pid})'),
     "ov_device": ("裝置：{name}", "Device: {name}"),
